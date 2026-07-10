@@ -908,6 +908,19 @@ KIRO_API_REGION="eu-central-1"
 
 ---
 
+## 👥 貢獻者
+
+<!-- ALL-CONTRIBUTORS-LIST:START -->
+<table>
+  <tr>
+    <td align="center"><a href="https://github.com/oddstab"><img src="https://github.com/oddstab.png?size=100" width="100px;" alt=""/><br /><sub><b>oddstab</b></sub></a><br />💻 📖 🚧</td>
+    <td align="center"><a href="https://claude.ai"><img src="https://avatars.githubusercontent.com/u/76263028?s=100" width="100px;" alt=""/><br /><sub><b>Claude (Anthropic)</b></sub></a><br />💻 📖</td>
+  </tr>
+</table>
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+---
+
 ## ⚠️ 免責聲明
 
 本專案與 Amazon Web Services (AWS)、Anthropic 或 Kiro IDE 無關，未經其認可或贊助。使用風險自負，請遵守底層 API 的服務條款。
