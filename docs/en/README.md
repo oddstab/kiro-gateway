@@ -545,7 +545,7 @@ Set environment variables to point Claude Code at this gateway:
 function cc {
     $env:ANTHROPIC_BASE_URL = 'http://localhost:8000'
     $env:ANTHROPIC_API_KEY = 'kiro-gateway-local'  # matches PROXY_API_KEY in .env
-    & claude --model claude-opus-4-6 @args
+    & claude --model 'claude-opus-4-6[1m]' --effort max @args
 }
 ```
 
@@ -562,7 +562,7 @@ cc --model claude-sonnet-5 "quick answer"  # switch model on the fly
 cc() {
     ANTHROPIC_BASE_URL='http://localhost:8000' \
     ANTHROPIC_API_KEY='kiro-gateway-local' \
-    claude --model claude-opus-4-6 "$@"
+    claude --model 'claude-opus-4-6[1m]' --effort max "$@"
 }
 ```
 

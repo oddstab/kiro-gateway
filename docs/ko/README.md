@@ -545,7 +545,7 @@ VPN_PROXY_URL=192.168.1.100:8080
 function cc {
     $env:ANTHROPIC_BASE_URL = 'http://localhost:8000'
     $env:ANTHROPIC_API_KEY = 'kiro-gateway-local'  # .env의 PROXY_API_KEY에 대응
-    & claude --model claude-opus-4-6 @args
+    & claude --model 'claude-opus-4-6[1m]' --effort max @args
 }
 ```
 
@@ -562,7 +562,7 @@ cc --model claude-sonnet-5 "간단한 질문"  # 모델 임시 전환
 cc() {
     ANTHROPIC_BASE_URL='http://localhost:8000' \
     ANTHROPIC_API_KEY='kiro-gateway-local' \
-    claude --model claude-opus-4-6 "$@"
+    claude --model 'claude-opus-4-6[1m]' --effort max "$@"
 }
 ```
 
