@@ -163,11 +163,36 @@ class WebSearchParser:
         """
         Flush any remaining buffered content (e.g. unclosed tag or tail).
 
-        Call this at end of stream.
+        If an unclosed <web_search> tag has parseable results, treat it as
+        a complete search block (Grok often omits the closing tag when it
+        also emits a bracket-style tool call).
         """
+        if self._in_tag and self._buffer.strip():
+            # Attempt to parse unclosed buffer as search results
+            buf_content = self._buffer
+            query, results = self._parse_search_content(buf_content)
+            self._in_tag = False
+            self._buffer = ""
+
+            if results:
+                tool_use_id = f"srvtoolu_{uuid.uuid4().hex[:24]}"
+                remaining = self._tail_buffer
+                self._tail_buffer = ""
+                return WebSearchParseResult(
+                    regular_content=remaining if remaining else None,
+                    search_results=results,
+                    query=query or "",
+                    tool_use_id=tool_use_id,
+                    buffering=False,
+                )
+            else:
+                # No parseable results — emit as raw text
+                remaining = self.OPEN_TAG + buf_content + self._tail_buffer
+                self._tail_buffer = ""
+                return WebSearchParseResult(regular_content=remaining)
+
         remaining = ""
         if self._in_tag:
-            # Unclosed tag — emit raw content
             remaining = self.OPEN_TAG + self._buffer
             self._in_tag = False
             self._buffer = ""

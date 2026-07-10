@@ -219,6 +219,15 @@ async def parse_kiro_stream(
 
         # Finalize web search parser (flush any remaining buffer)
         ws_final = ws_parser.finalize()
+        if ws_final.search_results is not None:
+            yield KiroEvent(type="web_search", web_search={
+                "query": ws_final.query,
+                "tool_use_id": ws_final.tool_use_id,
+                "results": [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet}
+                    for r in ws_final.search_results
+                ],
+            })
         if ws_final.regular_content:
             yield KiroEvent(type="content", content=ws_final.regular_content)
 
