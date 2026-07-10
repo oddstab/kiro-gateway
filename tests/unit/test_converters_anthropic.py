@@ -1870,17 +1870,195 @@ class TestAnthropicToKiroIntegration:
             max_tokens=1024,
             thinking={"type": "enabled", "budget_tokens": 6000}
         )
-        
+
         print("Calling anthropic_to_kiro...")
         with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000):
                     payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
-        
+
         print("Extracting userInputMessage content...")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         content = user_input["content"]
-        
+
         print(f"Checking for <max_thinking_length>6000</max_thinking_length>...")
         assert "<max_thinking_length>6000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+# ==================================================================================================
+# Tests for server-side tool blocks (server_tool_use, web_search_tool_result)
+# ==================================================================================================
+
+
+class TestServerSideToolBlocks:
+    """Tests for handling Anthropic server-side tool blocks in conversation history."""
+
+    def test_pydantic_accepts_server_tool_use_block(self):
+        """Messages with server_tool_use blocks pass Pydantic validation."""
+        msg = AnthropicMessage(
+            role="assistant",
+            content=[
+                {"type": "text", "text": "Let me search for that."},
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_abc123",
+                    "name": "web_search",
+                    "input": {"query": "Python asyncio"},
+                },
+            ],
+        )
+        assert msg.role == "assistant"
+        assert len(msg.content) == 2
+
+    def test_pydantic_accepts_web_search_tool_result_block(self):
+        """Messages with web_search_tool_result blocks pass Pydantic validation."""
+        msg = AnthropicMessage(
+            role="user",
+            content=[
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_abc123",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "title": "Python docs",
+                            "url": "https://docs.python.org",
+                            "encrypted_content": "Python is a programming language.",
+                        }
+                    ],
+                }
+            ],
+        )
+        assert msg.role == "user"
+
+    def test_convert_text_extracts_web_search_results(self):
+        """convert_anthropic_content_to_text extracts text from web_search_tool_result."""
+        content = [
+            {"type": "text", "text": "Here are the results:\n"},
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_abc123",
+                "content": [
+                    {
+                        "type": "web_search_result",
+                        "title": "Python docs",
+                        "url": "https://docs.python.org",
+                        "encrypted_content": "Python is great.",
+                    },
+                    {
+                        "type": "web_search_result",
+                        "title": "Asyncio guide",
+                        "url": "https://example.com/asyncio",
+                        "encrypted_content": "Asyncio is async.",
+                    },
+                ],
+            },
+        ]
+        result = convert_anthropic_content_to_text(content)
+        assert "Python docs" in result
+        assert "https://docs.python.org" in result
+        assert "Python is great." in result
+        assert "Asyncio guide" in result
+
+    def test_convert_text_ignores_server_tool_use(self):
+        """server_tool_use blocks produce no text output (metadata only)."""
+        content = [
+            {"type": "text", "text": "Searching..."},
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_abc123",
+                "name": "web_search",
+                "input": {"query": "test"},
+            },
+        ]
+        result = convert_anthropic_content_to_text(content)
+        assert result == "Searching..."
+
+    def test_extract_tool_uses_includes_server_tool_use(self):
+        """server_tool_use blocks are extracted as tool calls."""
+        content = [
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_abc123",
+                "name": "web_search",
+                "input": {"query": "test query"},
+            }
+        ]
+        tool_calls = extract_tool_uses_from_anthropic_content(content)
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["id"] == "srvtoolu_abc123"
+        assert tool_calls[0]["function"]["name"] == "web_search"
+        assert tool_calls[0]["function"]["arguments"] == {"query": "test query"}
+
+    def test_full_conversion_with_server_side_tools(self):
+        """End-to-end: request with server-side tool history converts without error."""
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                AnthropicMessage(
+                    role="user",
+                    content="Search for Python asyncio",
+                ),
+                AnthropicMessage(
+                    role="assistant",
+                    content=[
+                        {"type": "text", "text": "Let me search."},
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_abc123",
+                            "name": "web_search",
+                            "input": {"query": "Python asyncio"},
+                        },
+                    ],
+                ),
+                AnthropicMessage(
+                    role="user",
+                    content=[
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_abc123",
+                            "content": [
+                                {
+                                    "type": "web_search_result",
+                                    "title": "Python asyncio docs",
+                                    "url": "https://docs.python.org/3/library/asyncio.html",
+                                    "encrypted_content": "asyncio is a library...",
+                                }
+                            ],
+                        }
+                    ],
+                ),
+                AnthropicMessage(
+                    role="assistant",
+                    content="Based on the search results, asyncio is...",
+                ),
+                AnthropicMessage(
+                    role="user",
+                    content="Thanks, tell me more",
+                ),
+            ],
+            max_tokens=4096,
+            tools=[
+                AnthropicTool(
+                    name="web_search",
+                    description="Search the web",
+                    input_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+                )
+            ],
+        )
+
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
+            payload = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+
+        # 驗證 payload 結構正確
+        assert "conversationState" in payload
+        history = payload["conversationState"].get("history", [])
+        assert len(history) > 0
+
+        # 驗證 web_search 的 tool call 被保留在 history 的 assistant message
+        assistant_msgs = [h for h in history if "assistantResponseMessage" in h]
+        assert any(
+            "toolUses" in msg["assistantResponseMessage"]
+            for msg in assistant_msgs
+        )

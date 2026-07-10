@@ -52,6 +52,7 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     Anthropic content can be:
     - String: "Hello, world!"
     - List of content blocks: [{"type": "text", "text": "Hello"}]
+    - Server-side tool blocks (server_tool_use, web_search_tool_result)
 
     Args:
         content: Anthropic message content
@@ -66,13 +67,57 @@ def convert_anthropic_content_to_text(content: Any) -> str:
         text_parts = []
         for block in content:
             if isinstance(block, dict):
-                if block.get("type") == "text":
+                block_type = block.get("type")
+                if block_type == "text":
                     text_parts.append(block.get("text", ""))
-            elif hasattr(block, "type") and block.type == "text":
-                text_parts.append(block.text)
+                elif block_type == "web_search_tool_result":
+                    # 提取搜尋結果摘要文字
+                    text_parts.append(_extract_web_search_result_text(block))
+                elif block_type == "server_tool_use":
+                    # server_tool_use 本身沒有有用的文字，跳過
+                    pass
+            elif hasattr(block, "type"):
+                if block.type == "text":
+                    text_parts.append(block.text)
         return "".join(text_parts)
 
     return str(content) if content else ""
+
+
+def _extract_web_search_result_text(block: dict) -> str:
+    """
+    Extracts readable text from a web_search_tool_result block.
+
+    The block contains a list of web_search_result items with title/url/content.
+    We format them as a readable summary for the model.
+
+    Args:
+        block: web_search_tool_result content block
+
+    Returns:
+        Formatted text summary of search results
+    """
+    results = block.get("content", [])
+    if not isinstance(results, list):
+        return ""
+
+    parts = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "web_search_result":
+            title = item.get("title", "")
+            url = item.get("url", "")
+            snippet = item.get("encrypted_content", "") or item.get("content", "")
+            if title or snippet:
+                entry = f"[{title}]({url})" if url else title
+                if snippet:
+                    entry += f"\n{snippet}"
+                parts.append(entry)
+
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 
 def extract_system_prompt(system: Any) -> str:
@@ -238,7 +283,7 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
             tool_name = getattr(block, "name", None)
             tool_input = getattr(block, "input", {})
 
-        if block_type == "tool_use" and tool_id and tool_name:
+        if block_type in ("tool_use", "server_tool_use") and tool_id and tool_name:
             tool_calls.append(
                 {
                     "id": tool_id,
