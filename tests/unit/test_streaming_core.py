@@ -28,6 +28,7 @@ from kiro.streaming_core import (
     stream_with_first_token_retry,
     _process_chunk,
 )
+from kiro.web_search_parser import WebSearchParser
 
 
 # ==================================================================================================
@@ -545,7 +546,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', None):
+        async for event in _process_chunk(mock_parser, b'chunk', None, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")
@@ -565,7 +566,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', None):
+        async for event in _process_chunk(mock_parser, b'chunk', None, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")
@@ -585,7 +586,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', None):
+        async for event in _process_chunk(mock_parser, b'chunk', None, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")
@@ -609,7 +610,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', None):
+        async for event in _process_chunk(mock_parser, b'chunk', None, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")
@@ -638,7 +639,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk with thinking parser...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', mock_thinking_parser):
+        async for event in _process_chunk(mock_parser, b'chunk', mock_thinking_parser, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")
@@ -667,7 +668,7 @@ class TestProcessChunk:
         
         print("Action: Processing chunk with thinking content...")
         events = []
-        async for event in _process_chunk(mock_parser, b'chunk', mock_thinking_parser):
+        async for event in _process_chunk(mock_parser, b'chunk', mock_thinking_parser, WebSearchParser()):
             events.append(event)
         
         print(f"Received {len(events)} events")

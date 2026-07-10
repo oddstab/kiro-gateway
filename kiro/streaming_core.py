@@ -45,6 +45,7 @@ from kiro.config import (
     FAKE_REASONING_HANDLING,
 )
 from kiro.thinking_parser import ThinkingParser
+from kiro.web_search_parser import WebSearchParser, WebSearchParseResult
 
 if TYPE_CHECKING:
     from kiro.cache import ModelInfoCache
@@ -64,14 +65,15 @@ except ImportError:
 class KiroEvent:
     """
     Unified event from Kiro API stream.
-    
+
     This format is API-agnostic and can be converted to both OpenAI and Anthropic formats.
-    
+
     Attributes:
-        type: Event type (content, thinking, tool_use, usage, context_usage, error)
+        type: Event type (content, thinking, tool_use, web_search, usage, context_usage, error)
         content: Text content (for content events)
         thinking_content: Thinking/reasoning content (for thinking events)
         tool_use: Tool use data (for tool_use events)
+        web_search: Web search results data (for web_search events)
         usage: Usage/metering data (for usage events)
         context_usage_percentage: Context usage percentage (for context_usage events)
         is_first_thinking_chunk: Whether this is the first thinking chunk
@@ -81,6 +83,7 @@ class KiroEvent:
     content: Optional[str] = None
     thinking_content: Optional[str] = None
     tool_use: Optional[Dict[str, Any]] = None
+    web_search: Optional[Dict[str, Any]] = None
     usage: Optional[Dict[str, Any]] = None
     context_usage_percentage: Optional[float] = None
     is_first_thinking_chunk: bool = False
@@ -91,17 +94,19 @@ class KiroEvent:
 class StreamResult:
     """
     Result of collecting a complete stream response.
-    
+
     Attributes:
         content: Full text content
         thinking_content: Full thinking/reasoning content
         tool_calls: List of tool calls
+        web_searches: List of web search results from <web_search> tags
         usage: Usage information
         context_usage_percentage: Context usage percentage from Kiro API
     """
     content: str = ""
     thinking_content: str = ""
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    web_searches: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
     context_usage_percentage: Optional[float] = None
 
@@ -122,34 +127,37 @@ async def parse_kiro_stream(
 ) -> AsyncGenerator[KiroEvent, None]:
     """
     Parses Kiro SSE stream and yields unified events.
-    
+
     This is the core parsing function that converts Kiro's AWS SSE format
     into unified KiroEvent objects that can be formatted for any API.
-    
+
     Args:
         response: HTTP response with data stream
         first_token_timeout: First token wait timeout (seconds)
         enable_thinking_parser: Whether to enable thinking block parsing
-    
+
     Yields:
         KiroEvent objects representing stream events
-    
+
     Raises:
         FirstTokenTimeoutError: If first token not received within timeout
     """
     parser = AwsEventStreamParser()
     first_token_received = False
-    
+
     # Initialize thinking parser if fake reasoning is enabled
     thinking_parser: Optional[ThinkingParser] = None
     if FAKE_REASONING_ENABLED and enable_thinking_parser:
         thinking_parser = ThinkingParser(handling_mode=FAKE_REASONING_HANDLING)
         logger.debug(f"Thinking parser initialized with mode: {FAKE_REASONING_HANDLING}")
-    
+
+    # Initialize web search parser (always active — Grok outputs <web_search> tags)
+    ws_parser = WebSearchParser()
+
     try:
         # Create iterator for reading bytes
         byte_iterator = response.aiter_bytes()
-        
+
         # Wait for first chunk with timeout
         try:
             logger.debug(f"Waiting for first token (timeout={first_token_timeout}s)...")
@@ -169,24 +177,24 @@ async def parse_kiro_stream(
         # Process first chunk
         if debug_logger:
             debug_logger.log_raw_chunk(first_byte_chunk)
-        
-        async for event in _process_chunk(parser, first_byte_chunk, thinking_parser):
+
+        async for event in _process_chunk(parser, first_byte_chunk, thinking_parser, ws_parser):
             if event.type == "content" or event.type == "thinking":
                 first_token_received = True
             yield event
-        
+
         # Continue reading remaining chunks
         async for chunk in byte_iterator:
             if debug_logger:
                 debug_logger.log_raw_chunk(chunk)
-            
-            async for event in _process_chunk(parser, chunk, thinking_parser):
+
+            async for event in _process_chunk(parser, chunk, thinking_parser, ws_parser):
                 yield event
-        
+
         # Finalize thinking parser and yield any remaining content
         if thinking_parser:
             final_result = thinking_parser.finalize()
-            
+
             if final_result.thinking_content:
                 processed_thinking = thinking_parser.process_for_output(
                     final_result.thinking_content,
@@ -200,17 +208,24 @@ async def parse_kiro_stream(
                         is_first_thinking_chunk=final_result.is_first_thinking_chunk,
                         is_last_thinking_chunk=final_result.is_last_thinking_chunk,
                     )
-            
+
             if final_result.regular_content:
-                yield KiroEvent(type="content", content=final_result.regular_content)
-            
+                # Pass thinking parser's remaining content through web search parser
+                async for ev in _emit_through_ws_parser(final_result.regular_content, ws_parser):
+                    yield ev
+
             if thinking_parser.found_thinking_block:
                 logger.debug("Thinking block processing completed")
-        
+
+        # Finalize web search parser (flush any remaining buffer)
+        ws_final = ws_parser.finalize()
+        if ws_final.regular_content:
+            yield KiroEvent(type="content", content=ws_final.regular_content)
+
         # Check bracket-style tool calls in accumulated content
         all_tool_calls = parser.get_tool_calls()
         # Note: bracket tool calls are checked by the caller using full content
-        
+
         # Yield tool calls if any
         for tc in all_tool_calls:
             yield KiroEvent(type="tool_use", tool_use=tc)
@@ -227,32 +242,54 @@ async def parse_kiro_stream(
         raise
 
 
+async def _emit_through_ws_parser(content: str, ws_parser: WebSearchParser) -> AsyncGenerator[KiroEvent, None]:
+    """Pass content through web search parser and yield resulting events."""
+    ws_result = ws_parser.feed(content)
+    if ws_result.regular_content:
+        yield KiroEvent(type="content", content=ws_result.regular_content)
+    if ws_result.search_results is not None:
+        yield KiroEvent(type="web_search", web_search={
+            "query": ws_result.query,
+            "tool_use_id": ws_result.tool_use_id,
+            "results": [
+                {
+                    "title": r.title,
+                    "url": r.url,
+                    "snippet": r.snippet,
+                }
+                for r in ws_result.search_results
+            ],
+        })
+
+
 async def _process_chunk(
     parser: AwsEventStreamParser,
     chunk: bytes,
-    thinking_parser: Optional[ThinkingParser]
+    thinking_parser: Optional[ThinkingParser],
+    ws_parser: WebSearchParser,
 ) -> AsyncGenerator[KiroEvent, None]:
     """
     Process a single chunk from Kiro stream.
-    
+
     Args:
         parser: AWS event stream parser
         chunk: Raw bytes chunk
         thinking_parser: Optional thinking parser for fake reasoning
-    
+        ws_parser: Web search tag parser
+
     Yields:
         KiroEvent objects
     """
     events = parser.feed(chunk)
-    
+
     for event in events:
         if event["type"] == "content":
             content = event["data"]
-            
+
             # Process through thinking parser if enabled
             if thinking_parser:
                 parse_result = thinking_parser.feed(content)
-                
+
                 # Yield thinking content if any
                 if parse_result.thinking_content:
                     processed_thinking = thinking_parser.process_for_output(
@@ -267,17 +304,19 @@ async def _process_chunk(
                             is_first_thinking_chunk=parse_result.is_first_thinking_chunk,
                             is_last_thinking_chunk=parse_result.is_last_thinking_chunk,
                         )
-                
-                # Yield regular content if any
+
+                # Pass regular content through web search parser
                 if parse_result.regular_content:
-                    yield KiroEvent(type="content", content=parse_result.regular_content)
+                    async for ev in _emit_through_ws_parser(parse_result.regular_content, ws_parser):
+                        yield ev
             else:
-                # No thinking parser - pass through as-is
-                yield KiroEvent(type="content", content=content)
-        
+                # No thinking parser - pass through web search parser
+                async for ev in _emit_through_ws_parser(content, ws_parser):
+                    yield ev
+
         elif event["type"] == "usage":
             yield KiroEvent(type="usage", usage=event["data"])
-        
+
         elif event["type"] == "context_usage":
             yield KiroEvent(type="context_usage", context_usage_percentage=event["data"])
 
@@ -317,6 +356,8 @@ async def collect_stream_to_result(
             full_content_for_bracket_tools += event.thinking_content
         elif event.type == "tool_use" and event.tool_use:
             result.tool_calls.append(event.tool_use)
+        elif event.type == "web_search" and event.web_search:
+            result.web_searches.append(event.web_search)
         elif event.type == "usage" and event.usage:
             result.usage = event.usage
         elif event.type == "context_usage" and event.context_usage_percentage is not None:

@@ -183,7 +183,46 @@ async def stream_kiro_to_openai_internal(
                     debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
                 
                 yield chunk_text
-            
+
+            elif event.type == "web_search" and event.web_search:
+                # Format search results as text content (OpenAI has no structured search blocks)
+                ws_data = event.web_search
+                ws_query = ws_data.get("query", "")
+                ws_results = ws_data.get("results", [])
+
+                parts = [f"Search results for \"{ws_query}\":\n"]
+                for i, r in enumerate(ws_results, 1):
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    snippet = r.get("snippet", "")
+                    parts.append(f"{i}. [{title}]({url})")
+                    if snippet:
+                        parts.append(f"   {snippet}")
+                    parts.append("")
+
+                search_text = "\n".join(parts)
+                full_content += search_text
+
+                delta = {"content": search_text}
+                if first_chunk:
+                    delta["role"] = "assistant"
+                    first_chunk = False
+
+                openai_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                }
+
+                chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
+                if debug_logger:
+                    debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+
+                yield chunk_text
+
             elif event.type == "tool_use" and event.tool_use:
                 tool = event.tool_use
                 
