@@ -51,7 +51,7 @@
 
 ```env
 # デフォルトは claude-opus-4-6[1m]、任意のサポートモデルに変更可能
-GROK_TARGET_MODEL="claude-sonnet-5"
+GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 ```
 
 ### オープンモデル

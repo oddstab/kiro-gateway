@@ -51,7 +51,7 @@ Set `GROK_TARGET_MODEL` in `.env` to customize the target model:
 
 ```env
 # Defaults to claude-opus-4-6[1m], can be any supported model
-GROK_TARGET_MODEL="claude-sonnet-5"
+GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 ```
 
 ### Open Models
