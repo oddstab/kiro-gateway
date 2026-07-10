@@ -11,11 +11,10 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Sponsor](https://img.shields.io/badge/💖_Sponsor-개발_지원-ff69b4)](#-프로젝트-후원)
 
-*Kiro의 Claude 모델(Opus 4.8, Sonnet 5 등) 및 Grok 호환 모델을 Claude Code, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue 및 기타 OpenAI 또는 Anthropic 호환 도구와 함께 사용*
+*Kiro의 Claude 모델(Opus 4.8, Sonnet 5 등) 및 Grok 호환 모델을 Claude Code, Grok Build, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue 및 기타 OpenAI 또는 Anthropic 호환 도구와 함께 사용*
 
-[모델](#-지원-모델) • [기능](#-기능) • [빠른-시작](#-빠른-시작) • [설정](#%EF%B8%8F-설정) • [💖 후원](#-프로젝트-후원)
+[모델](#-지원-모델) • [기능](#-기능) • [빠른-시작](#-빠른-시작) • [설정](#%EF%B8%8F-설정)
 
 </div>
 
@@ -27,19 +26,15 @@
 
 ### Claude 모델
 
-🧠 **Claude Opus 4.8** — 최신, 최강 성능. 복잡한 추론, 아키텍처 설계, 에이전트 작업에 최적.
-
-🧠 **Claude Opus 4.7** — 이전 세대 플래그십. 깊은 분석과 다단계 문제 해결에 탁월.
-
-🧠 **Claude Opus 4.6** — 코딩과 추론 작업의 올라운더.
-
-🚀 **Claude Sonnet 5** — 최신 균형 모델. 코딩, 글쓰기, 범용 작업에 적합.
-
-🚀 **Claude Sonnet 4.5** — 빠르고 강력. 속도와 품질의 우수한 균형.
-
-📦 **Claude Sonnet 4** — 이전 세대. 대부분의 사용 사례에서 여전히 강력하고 신뢰할 수 있음.
-
-⚡ **Claude Haiku 4.5** — 번개처럼 빠름. 빠른 응답, 간단한 작업, 채팅에 완벽.
+| 모델 | 설명 |
+|------|------|
+| 🧠 Claude Opus 4.8 | 최신, 최강 성능. 복잡한 추론, 아키텍처 설계, 에이전트 작업에 최적 |
+| 🧠 Claude Opus 4.7 | 이전 세대 플래그십. 깊은 분석과 다단계 문제 해결에 탁월 |
+| 🧠 Claude Opus 4.6 | 코딩과 추론 작업의 올라운더 |
+| 🚀 Claude Sonnet 5 | 최신 균형 모델. 코딩, 글쓰기, 범용 작업에 적합 |
+| 🚀 Claude Sonnet 4.5 | 빠르고 강력. 속도와 품질의 우수한 균형 |
+| 📦 Claude Sonnet 4 | 이전 세대. 대부분의 사용 사례에서 여전히 강력하고 신뢰할 수 있음 |
+| ⚡ Claude Haiku 4.5 | 번개처럼 빠름. 빠른 응답, 간단한 작업, 채팅에 완벽 |
 
 ### Grok 호환성
 
@@ -47,29 +42,27 @@
 
 | Grok 모델 | 기본 매핑 대상 |
 |-----------|----------|
-| `grok-4.5` | `claude-opus-4.6` |
-| `grok-4` | `claude-opus-4.6` |
-| `grok-4-fast` | `claude-opus-4.6` |
-| `grok-3` | `claude-opus-4.6` |
+| `grok-4.5` | `claude-opus-4-6[1m]` |
+| `grok-4` | `claude-opus-4-6[1m]` |
+| `grok-4-fast` | `claude-opus-4-6[1m]` |
+| `grok-3` | `claude-opus-4-6[1m]` |
 
 `.env`에서 `GROK_TARGET_MODEL`을 설정하여 매핑 대상을 사용자 정의 가능:
 
 ```env
-# 기본값은 claude-opus-4.6, 지원되는 모든 모델로 변경 가능
+# 기본값은 claude-opus-4-6[1m], 지원되는 모든 모델로 변경 가능
 GROK_TARGET_MODEL="claude-sonnet-5"
 ```
 
 ### 오픈 모델
 
-💤 **GLM-5** — 오픈 MoE 모델 (744B 파라미터, 40B 활성). 복잡한 시스템 엔지니어링 및 장기 에이전트 작업을 위한 고급 모델.
-
-🐋 **DeepSeek-V3.2** — 오픈 MoE 모델 (685B 파라미터, 37B 활성). 코딩, 추론 및 일반 작업을 위한 균형 잡힌 성능.
-
-🧩 **MiniMax M2.5** — 오픈 MoE 모델 (230B 파라미터, 10B 활성). 향상된 추론 및 작업 처리 기능을 갖춘 개선된 버전.
-
-🧩 **MiniMax M2.1** — 오픈 MoE 모델 (230B 파라미터, 10B 활성). 복잡한 작업, 계획 및 다단계 워크플로우에 적합.
-
-🤖 **Qwen3-Coder-Next** — 오픈 MoE 모델 (80B 파라미터, 3B 활성). 코딩 중심. 개발 및 대규모 프로젝트에 탁월.
+| 모델 | 설명 |
+|------|------|
+| 💤 GLM-5 | 오픈 MoE（744B/40B 활성）. 복잡한 시스템 엔지니어링 및 장기 에이전트 작업 |
+| 🐋 DeepSeek-V3.2 | 오픈 MoE（685B/37B 활성）. 코딩, 추론 및 일반 작업 균형 |
+| 🧩 MiniMax M2.5 | 오픈 MoE（230B/10B 활성）. 향상된 추론 및 작업 처리 기능 |
+| 🧩 MiniMax M2.1 | 오픈 MoE（230B/10B 활성）. 복잡한 작업, 계획 및 다단계 워크플로우 |
+| 🤖 Qwen3-Coder-Next | 오픈 MoE（80B/3B 활성）. 코딩 중심, 대규모 프로젝트에 탁월 |
 
 > 💡 **스마트 모델 해석:** 어떤 모델 이름 형식이든 사용 가능 — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름도. 게이트웨이가 자동으로 정규화합니다.
 
@@ -875,38 +868,6 @@ AGPL-3.0은 이 소프트웨어에 대한 개선이 전체 커뮤니티에 이�
 - 기여를 제출할 권리가 있음
 - 메인테이너에게 기여를 사용하고 재라이선스할 권리를 부여함
 - 프로젝트가 법적으로 보호됨
-
----
-
-## 💖 프로젝트 후원
-
-<div align="center">
-
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Smiling%20Face%20with%20Hearts.png" alt="Love" width="80" />
-
-**이 프로젝트가 시간이나 돈을 절약해 주었다면 후원을 고려해 주세요!**
-
-모든 기여가 이 프로젝트를 유지하고 성장시키는 데 도움이 됩니다
-
-<br>
-
-### 🤑 기부
-
-[**☕ 일회성 후원**](https://app.lava.top/products/b4e34d12-3b6b-49b7-be50-50b6a20ed262/f3ea941f-de73-4ad1-bbb6-f82042ef8132)
-
-<br>
-
-### 🪙 또는 암호화폐 전송
-
-| 통화 | 네트워크 | 주소 |
-|:----:|:-------:|:-----|
-| **USDT** | TRC20 | `TSVtgRc9pkC1UgcbVeijBHjFmpkYHDRu26` |
-| **BTC** | Bitcoin | `12GZqxqpcBsqJ4Vf1YreLqwoMGvzBPgJq6` |
-| **ETH** | Ethereum | `0xc86eab3bba3bbaf4eb5b5fff8586f1460f1fd395` |
-| **SOL** | Solana | `9amykF7KibZmdaw66a1oqYJyi75fRqgdsqnG66AK3jvh` |
-| **TON** | TON | `UQBVh8T1H3GI7gd7b-_PPNnxHYYxptrcCVf3qQk5v41h3QTM` |
-
-</div>
 
 ---
 

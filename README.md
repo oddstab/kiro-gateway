@@ -12,9 +12,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
 
-*透過 Claude Code、OpenCode、OpenClaw、Claw Code、Codex app、Cursor、Cline、Roo Code、Kilo Code、Obsidian、OpenAI SDK、LangChain、Continue 等 OpenAI 或 Anthropic 相容工具，使用 Kiro 的 Claude（Opus 4.8、Sonnet 5 等）及 Grok 相容模型*
+*透過 Claude Code、Grok Build、OpenCode、OpenClaw、Claw Code、Codex app、Cursor、Cline、Roo Code、Kilo Code、Obsidian、OpenAI SDK、LangChain、Continue 等 OpenAI 或 Anthropic 相容工具，使用 Kiro 的 Claude（Opus 4.8、Sonnet 5 等）及 Grok 相容模型*
 
-[模型](#-可用模型) • [功能](#-功能特性) • [快速開始](#-快速開始) • [設定](#%EF%B8%8F-設定) • [💖 贊助](#-支持專案)
+[模型](#-可用模型) • [功能](#-功能特性) • [快速開始](#-快速開始) • [設定](#%EF%B8%8F-設定)
 
 </div>
 
@@ -26,19 +26,15 @@
 
 ### Claude 模型
 
-🧠 **Claude Opus 4.8** — 最新、最強大。適合複雜推理、架構設計和自主代理任務。
-
-🧠 **Claude Opus 4.7** — 上一代旗艦。深度分析和多步驟問題求解的優秀選擇。
-
-🧠 **Claude Opus 4.6** — 全能型選手，程式開發和推理任務均表現出色。
-
-🚀 **Claude Sonnet 5** — 最新均衡模型。程式開發、寫作和通用任務的絕佳選擇。
-
-🚀 **Claude Sonnet 4.5** — 快速且強大。速度與品質的絕佳平衡。
-
-📦 **Claude Sonnet 4** — 上一代模型。大多數場景仍然強大可靠。
-
-⚡ **Claude Haiku 4.5** — 閃電般快速。適合快速回應、簡單任務和聊天。
+| 模型 | 說明 |
+|------|------|
+| 🧠 Claude Opus 4.8 | 最新、最強大。適合複雜推理、架構設計和自主代理任務 |
+| 🧠 Claude Opus 4.7 | 上一代旗艦。深度分析和多步驟問題求解的優秀選擇 |
+| 🧠 Claude Opus 4.6 | 全能型選手，程式開發和推理任務均表現出色 |
+| 🚀 Claude Sonnet 5 | 最新均衡模型。程式開發、寫作和通用任務的絕佳選擇 |
+| 🚀 Claude Sonnet 4.5 | 快速且強大。速度與品質的絕佳平衡 |
+| 📦 Claude Sonnet 4 | 上一代模型。大多數場景仍然強大可靠 |
+| ⚡ Claude Haiku 4.5 | 閃電般快速。適合快速回應、簡單任務和聊天 |
 
 ### Grok 相容性
 
@@ -46,29 +42,27 @@
 
 | Grok 模型 | 預設對應 |
 |-----------|---------|
-| `grok-4.5` | `claude-opus-4.6` |
-| `grok-4` | `claude-opus-4.6` |
-| `grok-4-fast` | `claude-opus-4.6` |
-| `grok-3` | `claude-opus-4.6` |
+| `grok-4.5` | `claude-opus-4-6[1m]` |
+| `grok-4` | `claude-opus-4-6[1m]` |
+| `grok-4-fast` | `claude-opus-4-6[1m]` |
+| `grok-3` | `claude-opus-4-6[1m]` |
 
 在 `.env` 中設定 `GROK_TARGET_MODEL` 可自訂對應模型：
 
 ```env
-# 預設為 claude-opus-4.6，可改為任何支援的模型
+# 預設為 claude-opus-4-6[1m]，可改為任何支援的模型
 GROK_TARGET_MODEL="claude-sonnet-5"
 ```
 
 ### 開源模型
 
-💤 **GLM-5** — 開源 MoE 模型（744B 參數，40B 活躍）。適合複雜系統工程和長期自主代理任務。
-
-🐋 **DeepSeek-V3.2** — 開源 MoE 模型（685B 參數，37B 活躍）。程式開發、推理和通用任務的均衡表現。
-
-🧩 **MiniMax M2.5** — 開源 MoE 模型（230B 參數，10B 活躍）。增強版，推理和任務處理能力更強。
-
-🧩 **MiniMax M2.1** — 開源 MoE 模型（230B 參數，10B 活躍）。適合複雜任務、規劃和多步驟工作流程。
-
-🤖 **Qwen3-Coder-Next** — 開源 MoE 模型（80B 參數，3B 活躍）。程式開發導向，適合開發和大型專案。
+| 模型 | 說明 |
+|------|------|
+| 💤 GLM-5 | 開源 MoE（744B/40B 活躍）。複雜系統工程和長期自主代理任務 |
+| 🐋 DeepSeek-V3.2 | 開源 MoE（685B/37B 活躍）。程式開發、推理和通用任務均衡 |
+| 🧩 MiniMax M2.5 | 開源 MoE（230B/10B 活躍）。增強版，推理和任務處理能力更強 |
+| 🧩 MiniMax M2.1 | 開源 MoE（230B/10B 活躍）。複雜任務、規劃和多步驟工作流程 |
+| 🤖 Qwen3-Coder-Next | 開源 MoE（80B/3B 活躍）。程式開發導向，適合大型專案 |
 
 > 💡 **智慧模型解析：** 使用任何模型名稱格式 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`，甚至版本化名稱如 `claude-sonnet-4-5-20250929`。閘道器會自動正規化。
 

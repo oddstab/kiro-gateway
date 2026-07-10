@@ -246,7 +246,7 @@ HIDDEN_MODELS: Dict[str, str] = {
 #   }
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
-_GROK_TARGET = os.getenv("GROK_TARGET_MODEL", "claude-opus-4.6")
+_GROK_TARGET = os.getenv("GROK_TARGET_MODEL", "claude-opus-4-6[1m]")
 MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",
     "grok-4": _GROK_TARGET,
