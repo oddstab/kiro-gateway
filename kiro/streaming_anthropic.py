@@ -322,7 +322,84 @@ async def stream_kiro_to_anthropic(
                             }
                         })
                 # For "strip" mode, we just skip the thinking content
-            
+
+            elif event.type == "web_search" and event.web_search:
+                # Close thinking block if open
+                if thinking_block_started and thinking_block_index is not None:
+                    yield format_sse_event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": thinking_block_index
+                    })
+                    thinking_block_started = False
+                    current_block_index += 1
+
+                # Close text block if open
+                if text_block_started and text_block_index is not None:
+                    yield format_sse_event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": text_block_index
+                    })
+                    text_block_started = False
+                    current_block_index += 1
+
+                ws_data = event.web_search
+                ws_tool_use_id = ws_data.get("tool_use_id", "")
+                ws_query = ws_data.get("query", "")
+                ws_results = ws_data.get("results", [])
+
+                # Emit server_tool_use block
+                yield format_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": current_block_index,
+                    "content_block": {
+                        "id": ws_tool_use_id,
+                        "type": "server_tool_use",
+                        "name": "web_search",
+                        "input": {}
+                    }
+                })
+                yield format_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": current_block_index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps({"query": ws_query})
+                    }
+                })
+                yield format_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": current_block_index
+                })
+                current_block_index += 1
+
+                # Emit web_search_tool_result block
+                search_content = []
+                for r in ws_results:
+                    search_content.append({
+                        "type": "web_search_result",
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "encrypted_content": r.get("snippet", ""),
+                        "page_age": None
+                    })
+
+                yield format_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": current_block_index,
+                    "content_block": {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": ws_tool_use_id,
+                        "content": search_content
+                    }
+                })
+                yield format_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": current_block_index
+                })
+                current_block_index += 1
+
+                logger.debug(f"Emitted web_search blocks: query='{ws_query}', {len(ws_results)} results")
+
             elif event.type == "tool_use" and event.tool_use:
                 # Close thinking block if open
                 if thinking_block_started and thinking_block_index is not None:
@@ -783,7 +860,36 @@ async def collect_anthropic_response(
             "type": "text",
             "text": text_content
         })
-    
+
+    # Add web search blocks (server_tool_use + web_search_tool_result pairs)
+    for ws in result.web_searches:
+        ws_tool_use_id = ws.get("tool_use_id", "")
+        ws_query = ws.get("query", "")
+        ws_results = ws.get("results", [])
+
+        content_blocks.append({
+            "type": "server_tool_use",
+            "id": ws_tool_use_id,
+            "name": "web_search",
+            "input": {"query": ws_query}
+        })
+
+        search_content = []
+        for r in ws_results:
+            search_content.append({
+                "type": "web_search_result",
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "encrypted_content": r.get("snippet", ""),
+                "page_age": None
+            })
+
+        content_blocks.append({
+            "type": "web_search_tool_result",
+            "tool_use_id": ws_tool_use_id,
+            "content": search_content
+        })
+
     # Add tool use blocks
     for tc in result.tool_calls:
         tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"
