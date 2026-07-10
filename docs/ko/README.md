@@ -45,12 +45,19 @@
 
 게이트웨이는 Grok 모델 이름을 별칭으로 지원하여 xAI API의 드롭인 대체품으로 사용 가능:
 
-| Grok 모델 | 매핑 대상 |
+| Grok 모델 | 기본 매핑 대상 |
 |-----------|----------|
 | `grok-4.5` | `claude-opus-4.6` |
 | `grok-4` | `claude-opus-4.6` |
 | `grok-4-fast` | `claude-opus-4.6` |
 | `grok-3` | `claude-opus-4.6` |
+
+`.env`에서 `GROK_TARGET_MODEL`을 설정하여 매핑 대상을 사용자 정의 가능:
+
+```env
+# 기본값은 claude-opus-4.6, 지원되는 모든 모델로 변경 가능
+GROK_TARGET_MODEL="claude-sonnet-5"
+```
 
 ### 오픈 모델
 

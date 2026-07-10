@@ -45,12 +45,19 @@ Made with ❤️ by [@oddstab](https://github.com/oddstab)
 
 The gateway supports Grok model names as aliases, making it a drop-in replacement for xAI API:
 
-| Grok Model | Maps To |
+| Grok Model | Default Maps To |
 |------------|---------|
 | `grok-4.5` | `claude-opus-4.6` |
 | `grok-4` | `claude-opus-4.6` |
 | `grok-4-fast` | `claude-opus-4.6` |
 | `grok-3` | `claude-opus-4.6` |
+
+Set `GROK_TARGET_MODEL` in `.env` to customize the target model:
+
+```env
+# Defaults to claude-opus-4.6, can be any supported model
+GROK_TARGET_MODEL="claude-sonnet-5"
+```
 
 ### Open Models
 

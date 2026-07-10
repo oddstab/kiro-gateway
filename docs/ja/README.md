@@ -45,12 +45,19 @@
 
 ゲートウェイは Grok モデル名をエイリアスとしてサポートし、xAI API のドロップイン代替として使用可能：
 
-| Grok モデル | マッピング先 |
+| Grok モデル | デフォルトマッピング先 |
 |------------|------------|
 | `grok-4.5` | `claude-opus-4.6` |
 | `grok-4` | `claude-opus-4.6` |
 | `grok-4-fast` | `claude-opus-4.6` |
 | `grok-3` | `claude-opus-4.6` |
+
+`.env` で `GROK_TARGET_MODEL` を設定してマッピング先をカスタマイズ可能：
+
+```env
+# デフォルトは claude-opus-4.6、任意のサポートモデルに変更可能
+GROK_TARGET_MODEL="claude-sonnet-5"
+```
 
 ### オープンモデル
 

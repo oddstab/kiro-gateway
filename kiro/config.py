@@ -246,12 +246,13 @@ HIDDEN_MODELS: Dict[str, str] = {
 #   }
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
+_GROK_TARGET = os.getenv("GROK_TARGET_MODEL", "claude-opus-4.6")
 MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",
-    "grok-4": "claude-opus-4.6",
-    "grok-4-fast": "claude-opus-4.6",
-    "grok-3": "claude-opus-4.6",
-    "grok-4.5": "claude-opus-4.6",
+    "grok-4": _GROK_TARGET,
+    "grok-4-fast": _GROK_TARGET,
+    "grok-3": _GROK_TARGET,
+    "grok-4.5": _GROK_TARGET,
 }
 
 # Models to hide from /v1/models endpoint.

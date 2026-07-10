@@ -44,12 +44,19 @@
 
 閘道器支援 Grok 模型名稱作為別名，可直接替代 xAI API：
 
-| Grok 模型 | 對應模型 |
+| Grok 模型 | 預設對應 |
 |-----------|---------|
 | `grok-4.5` | `claude-opus-4.6` |
 | `grok-4` | `claude-opus-4.6` |
 | `grok-4-fast` | `claude-opus-4.6` |
 | `grok-3` | `claude-opus-4.6` |
+
+在 `.env` 中設定 `GROK_TARGET_MODEL` 可自訂對應模型：
+
+```env
+# 預設為 claude-opus-4.6，可改為任何支援的模型
+GROK_TARGET_MODEL="claude-sonnet-5"
+```
 
 ### 開源模型
 
