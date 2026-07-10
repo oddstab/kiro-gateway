@@ -11,11 +11,10 @@ Made with ❤️ by [@oddstab](https://github.com/oddstab)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Sponsor](https://img.shields.io/badge/💖_Sponsor-Support_Development-ff69b4)](#-support-the-project)
 
-*Use Claude (Opus 4.8, Sonnet 5, etc.) and Grok-compatible models from Kiro with Claude Code, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue and other OpenAI or Anthropic compatible tools*
+*Use Claude (Opus 4.8, Sonnet 5, etc.) and Grok-compatible models from Kiro with Claude Code, Grok Build, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue and other OpenAI or Anthropic compatible tools*
 
-[Models](#-supported-models) • [Features](#-features) • [Quick Start](#-quick-start) • [Configuration](#%EF%B8%8F-configuration) • [💖 Sponsor](#-support-the-project)
+[Models](#-supported-models) • [Features](#-features) • [Quick Start](#-quick-start) • [Configuration](#%EF%B8%8F-configuration)
 
 </div>
 
@@ -27,19 +26,15 @@ Made with ❤️ by [@oddstab](https://github.com/oddstab)
 
 ### Claude Models
 
-🧠 **Claude Opus 4.8** — Latest and most capable. Best for complex reasoning, architecture, and agentic tasks.
-
-🧠 **Claude Opus 4.7** — Previous flagship. Excellent for deep analysis and multi-step problem solving.
-
-🧠 **Claude Opus 4.6** — Strong all-rounder for coding and reasoning tasks.
-
-🚀 **Claude Sonnet 5** — Latest balanced model. Great for coding, writing, and general-purpose tasks.
-
-🚀 **Claude Sonnet 4.5** — Fast and capable. Excellent balance of speed and quality.
-
-📦 **Claude Sonnet 4** — Previous generation. Still powerful and reliable for most use cases.
-
-⚡ **Claude Haiku 4.5** — Lightning fast. Perfect for quick responses, simple tasks, and chat.
+| Model | Description |
+|-------|-------------|
+| 🧠 Claude Opus 4.8 | Latest and most capable. Best for complex reasoning, architecture, and agentic tasks |
+| 🧠 Claude Opus 4.7 | Previous flagship. Excellent for deep analysis and multi-step problem solving |
+| 🧠 Claude Opus 4.6 | Strong all-rounder for coding and reasoning tasks |
+| 🚀 Claude Sonnet 5 | Latest balanced model. Great for coding, writing, and general-purpose tasks |
+| 🚀 Claude Sonnet 4.5 | Fast and capable. Excellent balance of speed and quality |
+| 📦 Claude Sonnet 4 | Previous generation. Still powerful and reliable for most use cases |
+| ⚡ Claude Haiku 4.5 | Lightning fast. Perfect for quick responses, simple tasks, and chat |
 
 ### Grok Compatibility
 
@@ -47,29 +42,27 @@ The gateway supports Grok model names as aliases, making it a drop-in replacemen
 
 | Grok Model | Default Maps To |
 |------------|---------|
-| `grok-4.5` | `claude-opus-4.6` |
-| `grok-4` | `claude-opus-4.6` |
-| `grok-4-fast` | `claude-opus-4.6` |
-| `grok-3` | `claude-opus-4.6` |
+| `grok-4.5` | `claude-opus-4-6[1m]` |
+| `grok-4` | `claude-opus-4-6[1m]` |
+| `grok-4-fast` | `claude-opus-4-6[1m]` |
+| `grok-3` | `claude-opus-4-6[1m]` |
 
 Set `GROK_TARGET_MODEL` in `.env` to customize the target model:
 
 ```env
-# Defaults to claude-opus-4.6, can be any supported model
+# Defaults to claude-opus-4-6[1m], can be any supported model
 GROK_TARGET_MODEL="claude-sonnet-5"
 ```
 
 ### Open Models
 
-💤 **GLM-5** — Open MoE model (744B params, 40B active). Advanced model for complex systems engineering and long-horizon agentic tasks.
-
-🐋 **DeepSeek-V3.2** — Open MoE model (685B params, 37B active). Balanced performance for coding, reasoning, and general tasks.
-
-🧩 **MiniMax M2.5** — Open MoE model (230B params, 10B active). Enhanced version with improved reasoning and task handling.
-
-🧩 **MiniMax M2.1** — Open MoE model (230B params, 10B active). Great for complex tasks, planning, and multi-step workflows.
-
-🤖 **Qwen3-Coder-Next** — Open MoE model (80B params, 3B active). Coding-focused. Excellent for development and large projects.
+| Model | Description |
+|-------|-------------|
+| 💤 GLM-5 | Open MoE (744B/40B active). Complex systems engineering and long-horizon agentic tasks |
+| 🐋 DeepSeek-V3.2 | Open MoE (685B/37B active). Balanced for coding, reasoning, and general tasks |
+| 🧩 MiniMax M2.5 | Open MoE (230B/10B active). Enhanced reasoning and task handling |
+| 🧩 MiniMax M2.1 | Open MoE (230B/10B active). Complex tasks, planning, and multi-step workflows |
+| 🤖 Qwen3-Coder-Next | Open MoE (80B/3B active). Coding-focused, great for large projects |
 
 > 💡 **Smart Model Resolution:** Use any model name format — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, or even versioned names like `claude-sonnet-4-5-20250929`. The gateway normalizes them automatically.
 
@@ -913,38 +906,6 @@ By submitting a contribution to this project, you agree to the terms of our [Con
 - You have the right to submit the contribution
 - You grant the maintainer rights to use and relicense your contribution
 - The project remains legally protected
-
----
-
-## 💖 Support the Project
-
-<div align="center">
-
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Smiling%20Face%20with%20Hearts.png" alt="Love" width="80" />
-
-**If this project saved you time or money, consider supporting it!**
-
-Every contribution helps keep this project alive and growing
-
-<br>
-
-### 🤑 Donate
-
-[**☕ One-time Support**](https://app.lava.top/products/b4e34d12-3b6b-49b7-be50-50b6a20ed262/f3ea941f-de73-4ad1-bbb6-f82042ef8132)
-
-<br>
-
-### 🪙 Or send crypto
-
-| Currency | Network | Address |
-|:--------:|:-------:|:--------|
-| **USDT** | TRC20 | `TSVtgRc9pkC1UgcbVeijBHjFmpkYHDRu26` |
-| **BTC** | Bitcoin | `12GZqxqpcBsqJ4Vf1YreLqwoMGvzBPgJq6` |
-| **ETH** | Ethereum | `0xc86eab3bba3bbaf4eb5b5fff8586f1460f1fd395` |
-| **SOL** | Solana | `9amykF7KibZmdaw66a1oqYJyi75fRqgdsqnG66AK3jvh` |
-| **TON** | TON | `UQBVh8T1H3GI7gd7b-_PPNnxHYYxptrcCVf3qQk5v41h3QTM` |
-
-</div>
 
 ---
 

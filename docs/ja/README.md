@@ -11,11 +11,10 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Sponsor](https://img.shields.io/badge/💖_Sponsor-開発を支援-ff69b4)](#-プロジェクトを支援)
 
-*Kiro の Claude モデル（Opus 4.8、Sonnet 5 等）及び Grok 互換モデルを Claude Code、OpenCode、OpenClaw、Claw Code、Codex app、Cursor、Cline、Roo Code、Kilo Code、Obsidian、OpenAI SDK、LangChain、Continue などの OpenAI または Anthropic 互換ツールで使用*
+*Kiro の Claude モデル（Opus 4.8、Sonnet 5 等）及び Grok 互換モデルを Claude Code、Grok Build、OpenCode、OpenClaw、Claw Code、Codex app、Cursor、Cline、Roo Code、Kilo Code、Obsidian、OpenAI SDK、LangChain、Continue などの OpenAI または Anthropic 互換ツールで使用*
 
-[モデル](#-対応モデル) • [機能](#-機能) • [クイックスタート](#-クイックスタート) • [設定](#%EF%B8%8F-設定) • [💖 サポート](#-プロジェクトを支援)
+[モデル](#-対応モデル) • [機能](#-機能) • [クイックスタート](#-クイックスタート) • [設定](#%EF%B8%8F-設定)
 
 </div>
 
@@ -27,19 +26,15 @@
 
 ### Claude モデル
 
-🧠 **Claude Opus 4.8** — 最新かつ最も高性能。複雑な推論、アーキテクチャ設計、エージェントタスクに最適。
-
-🧠 **Claude Opus 4.7** — 前世代フラッグシップ。深い分析とマルチステップ問題解決に優れる。
-
-🧠 **Claude Opus 4.6** — コーディングと推論タスクの万能選手。
-
-🚀 **Claude Sonnet 5** — 最新のバランスモデル。コーディング、ライティング、汎用タスクに最適。
-
-🚀 **Claude Sonnet 4.5** — 高速かつ高性能。速度と品質の優れたバランス。
-
-📦 **Claude Sonnet 4** — 前世代モデル。ほとんどのユースケースで依然として強力で信頼性が高い。
-
-⚡ **Claude Haiku 4.5** — 超高速。クイックレスポンス、シンプルなタスク、チャットに最適。
+| モデル | 説明 |
+|--------|------|
+| 🧠 Claude Opus 4.8 | 最新かつ最も高性能。複雑な推論、アーキテクチャ設計、エージェントタスクに最適 |
+| 🧠 Claude Opus 4.7 | 前世代フラッグシップ。深い分析とマルチステップ問題解決に優れる |
+| 🧠 Claude Opus 4.6 | コーディングと推論タスクの万能選手 |
+| 🚀 Claude Sonnet 5 | 最新のバランスモデル。コーディング、ライティング、汎用タスクに最適 |
+| 🚀 Claude Sonnet 4.5 | 高速かつ高性能。速度と品質の優れたバランス |
+| 📦 Claude Sonnet 4 | 前世代モデル。ほとんどのユースケースで依然として強力で信頼性が高い |
+| ⚡ Claude Haiku 4.5 | 超高速。クイックレスポンス、シンプルなタスク、チャットに最適 |
 
 ### Grok 互換性
 
@@ -47,29 +42,27 @@
 
 | Grok モデル | デフォルトマッピング先 |
 |------------|------------|
-| `grok-4.5` | `claude-opus-4.6` |
-| `grok-4` | `claude-opus-4.6` |
-| `grok-4-fast` | `claude-opus-4.6` |
-| `grok-3` | `claude-opus-4.6` |
+| `grok-4.5` | `claude-opus-4-6[1m]` |
+| `grok-4` | `claude-opus-4-6[1m]` |
+| `grok-4-fast` | `claude-opus-4-6[1m]` |
+| `grok-3` | `claude-opus-4-6[1m]` |
 
 `.env` で `GROK_TARGET_MODEL` を設定してマッピング先をカスタマイズ可能：
 
 ```env
-# デフォルトは claude-opus-4.6、任意のサポートモデルに変更可能
+# デフォルトは claude-opus-4-6[1m]、任意のサポートモデルに変更可能
 GROK_TARGET_MODEL="claude-sonnet-5"
 ```
 
 ### オープンモデル
 
-💤 **GLM-5** — オープンMoEモデル（744Bパラメータ、40B活性）。複雑なシステムエンジニアリングと長期的なエージェントタスクのための高度なモデル。
-
-🐋 **DeepSeek-V3.2** — オープンMoEモデル（685Bパラメータ、37B活性）。コーディング、推論、一般的なタスクのバランスの取れたパフォーマンス。
-
-🧩 **MiniMax M2.5** — オープンMoEモデル（230Bパラメータ、10B活性）。推論とタスク処理能力が向上した強化版。
-
-🧩 **MiniMax M2.1** — オープンMoEモデル（230Bパラメータ、10B活性）。複雑なタスク、計画、マルチステップワークフローに最適。
-
-🤖 **Qwen3-Coder-Next** — オープンMoEモデル（80Bパラメータ、3B活性）。コーディング重視。開発と大規模プロジェクトに最適。
+| モデル | 説明 |
+|--------|------|
+| 💤 GLM-5 | オープンMoE（744B/40B活性）。複雑なシステムエンジニアリングと長期エージェントタスク |
+| 🐋 DeepSeek-V3.2 | オープンMoE（685B/37B活性）。コーディング、推論、一般タスクのバランス |
+| 🧩 MiniMax M2.5 | オープンMoE（230B/10B活性）。推論とタスク処理能力が向上した強化版 |
+| 🧩 MiniMax M2.1 | オープンMoE（230B/10B活性）。複雑なタスク、計画、マルチステップワークフロー |
+| 🤖 Qwen3-Coder-Next | オープンMoE（80B/3B活性）。コーディング重視、大規模プロジェクトに最適 |
 
 > 💡 **スマートモデル解決:** どんなモデル名形式でも使用可能 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`、または `claude-sonnet-4-5-20250929` のようなバージョン付き名前も。ゲートウェイが自動的に正規化します。
 
@@ -875,38 +868,6 @@ AGPL-3.0 は、このソフトウェアへの改善がコミュニティ全体�
 - 貢献を提出する権利があること
 - メンテナーに貢献を使用および再ライセンスする権利を付与すること
 - プロジェクトが法的に保護されること
-
----
-
-## 💖 プロジェクトを支援
-
-<div align="center">
-
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Smiling%20Face%20with%20Hearts.png" alt="Love" width="80" />
-
-**このプロジェクトが時間やお金を節約したなら、支援をご検討ください！**
-
-すべての貢献がこのプロジェクトの維持と成長に役立ちます
-
-<br>
-
-### 🤑 寄付
-
-[**☕ 一回限りのサポート**](https://app.lava.top/products/b4e34d12-3b6b-49b7-be50-50b6a20ed262/f3ea941f-de73-4ad1-bbb6-f82042ef8132)
-
-<br>
-
-### 🪙 または暗号通貨を送信
-
-| 通貨 | ネットワーク | アドレス |
-|:----:|:----------:|:--------|
-| **USDT** | TRC20 | `TSVtgRc9pkC1UgcbVeijBHjFmpkYHDRu26` |
-| **BTC** | Bitcoin | `12GZqxqpcBsqJ4Vf1YreLqwoMGvzBPgJq6` |
-| **ETH** | Ethereum | `0xc86eab3bba3bbaf4eb5b5fff8586f1460f1fd395` |
-| **SOL** | Solana | `9amykF7KibZmdaw66a1oqYJyi75fRqgdsqnG66AK3jvh` |
-| **TON** | TON | `UQBVh8T1H3GI7gd7b-_PPNnxHYYxptrcCVf3qQk5v41h3QTM` |
-
-</div>
 
 ---
 
