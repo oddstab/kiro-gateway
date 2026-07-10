@@ -4,16 +4,16 @@
 
 **Kiro API (Amazon Q Developer / AWS CodeWhisperer) 프록시 게이트웨이**
 
-[🇬🇧 English](../../README.md) • [🇷🇺 Русский](../ru/README.md) • [🇨🇳 中文](../zh/README.md) • [🇪🇸 Español](../es/README.md) • [🇮🇩 Indonesia](../id/README.md) • [🇧🇷 Português](../pt/README.md) • [🇯🇵 日本語](../ja/README.md) • 🇰🇷 한국어
+[🇹🇼 繁體中文](../../README.md) • [🇬🇧 English](../en/README.md) • [🇯🇵 日本語](../ja/README.md) • 🇰🇷 한국어
 
-[@Jwadow](https://github.com/jwadow)가 ❤️를 담아 제작
+[@oddstab](https://github.com/oddstab)가 ❤️를 담아 제작
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
 [![Sponsor](https://img.shields.io/badge/💖_Sponsor-개발_지원-ff69b4)](#-프로젝트-후원)
 
-*Kiro의 Claude 모델을 Claude Code, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue 및 기타 OpenAI 또는 Anthropic 호환 도구와 함께 사용*
+*Kiro의 Claude 모델(Opus 4.8, Sonnet 5 등) 및 Grok 호환 모델을 Claude Code, OpenCode, OpenClaw, Claw Code, Codex app, Cursor, Cline, Roo Code, Kilo Code, Obsidian, OpenAI SDK, LangChain, Continue 및 기타 OpenAI 또는 Anthropic 호환 도구와 함께 사용*
 
 [모델](#-지원-모델) • [기능](#-기능) • [빠른-시작](#-빠른-시작) • [설정](#%EF%B8%8F-설정) • [💖 후원](#-프로젝트-후원)
 
@@ -21,17 +21,38 @@
 
 ---
 
-## 🤖 사용 가능한 모델 (무료 목록)
+## 🤖 사용 가능한 모델
 
-> ⚠️ **중요:** 모델 가용성은 Kiro 플랜(무료/유료)에 따라 다릅니다. 게이트웨이는 구독에 따라 IDE 또는 CLI에서 사용 가능한 모델에 대한 액세스를 제공합니다. 아래 목록은 **무료 플랜**에서 일반적으로 사용 가능한 모델을 보여줍니다.
+> ⚠️ **중요:** 모델 가용성은 Kiro 플랜(무료/유료)에 따라 다릅니다. 게이트웨이는 구독에 따라 IDE 또는 CLI에서 사용 가능한 모델에 대한 액세스를 제공합니다.
 
-> 🔒 **Claude Opus 4.5**는 2026년 1월 17일에 무료 플랜에서 제거되었습니다. 유료 플랜에서 사용 가능할 수 있습니다 — IDE/CLI의 모델 목록을 확인하세요.
+### Claude 모델
 
-🚀 **Claude Sonnet 4.5** — 균형 잡힌 성능. 코딩, 글쓰기, 범용 작업에 적합.
+🧠 **Claude Opus 4.8** — 최신, 최강 성능. 복잡한 추론, 아키텍처 설계, 에이전트 작업에 최적.
+
+🧠 **Claude Opus 4.7** — 이전 세대 플래그십. 깊은 분석과 다단계 문제 해결에 탁월.
+
+🧠 **Claude Opus 4.6** — 코딩과 추론 작업의 올라운더.
+
+🚀 **Claude Sonnet 5** — 최신 균형 모델. 코딩, 글쓰기, 범용 작업에 적합.
+
+🚀 **Claude Sonnet 4.5** — 빠르고 강력. 속도와 품질의 우수한 균형.
+
+📦 **Claude Sonnet 4** — 이전 세대. 대부분의 사용 사례에서 여전히 강력하고 신뢰할 수 있음.
 
 ⚡ **Claude Haiku 4.5** — 번개처럼 빠름. 빠른 응답, 간단한 작업, 채팅에 완벽.
 
-📦 **Claude Sonnet 4** — 이전 세대. 대부분의 사용 사례에서 여전히 강력하고 신뢰할 수 있음.
+### Grok 호환성
+
+게이트웨이는 Grok 모델 이름을 별칭으로 지원하여 xAI API의 드롭인 대체품으로 사용 가능:
+
+| Grok 모델 | 매핑 대상 |
+|-----------|----------|
+| `grok-4.5` | `claude-opus-4.6` |
+| `grok-4` | `claude-opus-4.6` |
+| `grok-4-fast` | `claude-opus-4.6` |
+| `grok-3` | `claude-opus-4.6` |
+
+### 오픈 모델
 
 💤 **GLM-5** — 오픈 MoE 모델 (744B 파라미터, 40B 활성). 복잡한 시스템 엔지니어링 및 장기 에이전트 작업을 위한 고급 모델.
 
@@ -43,7 +64,7 @@
 
 🤖 **Qwen3-Coder-Next** — 오픈 MoE 모델 (80B 파라미터, 3B 활성). 코딩 중심. 개발 및 대규모 프로젝트에 탁월.
 
-> 💡 **스마트 모델 해석:** 어떤 모델 이름 형식이든 사용 가능 — `claude-sonnet-4-5`, `claude-sonnet-4.5`, 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름도. 게이트웨이가 자동으로 정규화합니다.
+> 💡 **스마트 모델 해석:** 어떤 모델 이름 형식이든 사용 가능 — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름도. 게이트웨이가 자동으로 정규화합니다.
 
 ---
 
@@ -84,7 +105,7 @@
 
 ```bash
 # 저장소 클론 (Git 필요)
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/oddstab/kiro-gateway.git
 cd kiro-gateway
 
 # 또는 ZIP 다운로드: Code → Download ZIP → 압축 해제 → kiro-gateway 폴더 열기
@@ -349,7 +370,7 @@ ACCOUNT_SYSTEM=true
 
 ```bash
 # 1. 클론 및 설정
-git clone https://github.com/Jwadow/kiro-gateway.git
+git clone https://github.com/oddstab/kiro-gateway.git
 cd kiro-gateway
 cp .env.example .env
 # .env를 자격 증명으로 편집
@@ -373,7 +394,7 @@ docker run -d \
   -e PROXY_API_KEY="my-super-secret-password-123" \
   -e REFRESH_TOKEN="your_refresh_token" \
   --name kiro-gateway \
-  ghcr.io/jwadow/kiro-gateway:latest
+  ghcr.io/oddstab/kiro-gateway:latest
 ```
 
 </details>
@@ -389,7 +410,7 @@ docker run -d \
   -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json \
   -e PROXY_API_KEY="my-super-secret-password-123" \
   --name kiro-gateway \
-  ghcr.io/jwadow/kiro-gateway:latest
+  ghcr.io/oddstab/kiro-gateway:latest
 ```
 
 **Windows (PowerShell):**
@@ -400,7 +421,7 @@ docker run -d `
   -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json `
   -e PROXY_API_KEY="my-super-secret-password-123" `
   --name kiro-gateway `
-  ghcr.io/jwadow/kiro-gateway:latest
+  ghcr.io/oddstab/kiro-gateway:latest
 ```
 
 </details>
