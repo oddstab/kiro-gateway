@@ -163,6 +163,8 @@ class ImageContentBlock(BaseModel):
 
 
 # Union type for all content blocks (including images and thinking)
+# Dict[str, Any] catch-all handles server-side tool blocks (server_tool_use,
+# web_search_tool_result) that clients echo back in conversation history.
 ContentBlock = Union[
     TextContentBlock,
     ThinkingContentBlock,
@@ -170,6 +172,7 @@ ContentBlock = Union[
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    Dict[str, Any],
 ]
 
 
