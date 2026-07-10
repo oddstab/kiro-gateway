@@ -533,6 +533,68 @@ VPN_PROXY_URL=192.168.1.100:8080
 
 ---
 
+## 🖥️ 搭配 AI 程式開發工具使用
+
+### Claude Code
+
+設定環境變數將 Claude Code 指向本閘道器：
+
+```powershell
+# PowerShell profile (~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1)
+function cc {
+    $env:ANTHROPIC_BASE_URL = 'http://localhost:8000'
+    $env:ANTHROPIC_API_KEY = 'kiro-gateway-local'  # 對應 .env 中的 PROXY_API_KEY
+    & claude --model claude-opus-4-6 @args
+}
+```
+
+使用：
+```powershell
+cc                     # 互動模式
+cc "幫我修這個 bug"    # 直接下指令
+cc --model claude-sonnet-5 "快速回答"  # 臨時切換模型
+```
+
+**Linux/macOS (bash/zsh):**
+```bash
+# ~/.bashrc 或 ~/.zshrc
+cc() {
+    ANTHROPIC_BASE_URL='http://localhost:8000' \
+    ANTHROPIC_API_KEY='kiro-gateway-local' \
+    claude --model claude-opus-4-6 "$@"
+}
+```
+
+### Grok Build
+
+設定環境變數將 Grok Build 指向本閘道器（透過 Grok 別名自動對應 Claude 模型）：
+
+```powershell
+# PowerShell profile
+function gg {
+    $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
+    $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # 對應 .env 中的 PROXY_API_KEY
+    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+}
+```
+
+Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4.6`，可在 `.env` 中修改）。
+
+**Linux/macOS:**
+```bash
+gg() {
+    GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
+    GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
+    grok --disable-web-search "$@"
+}
+```
+
+### 其他工具
+
+任何支援 OpenAI 或 Anthropic API 的工具都能使用，只要將 base URL 指向 `http://localhost:8000`（Anthropic）或 `http://localhost:8000/v1`（OpenAI），API key 設為你的 `PROXY_API_KEY` 即可。
+
+---
+
 ## 📡 API 參考
 
 ### 端點

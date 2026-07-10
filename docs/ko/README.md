@@ -534,6 +534,68 @@ VPN_PROXY_URL=192.168.1.100:8080
 
 ---
 
+## 🖥️ AI 코딩 도구와 함께 사용
+
+### Claude Code
+
+환경 변수를 설정하여 Claude Code를 게이트웨이에 연결:
+
+```powershell
+# PowerShell profile (~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1)
+function cc {
+    $env:ANTHROPIC_BASE_URL = 'http://localhost:8000'
+    $env:ANTHROPIC_API_KEY = 'kiro-gateway-local'  # .env의 PROXY_API_KEY에 대응
+    & claude --model claude-opus-4-6 @args
+}
+```
+
+사용법:
+```powershell
+cc                     # 인터랙티브 모드
+cc "이 버그 수정해줘"    # 직접 지시
+cc --model claude-sonnet-5 "간단한 질문"  # 모델 임시 전환
+```
+
+**Linux/macOS (bash/zsh):**
+```bash
+# ~/.bashrc 또는 ~/.zshrc
+cc() {
+    ANTHROPIC_BASE_URL='http://localhost:8000' \
+    ANTHROPIC_API_KEY='kiro-gateway-local' \
+    claude --model claude-opus-4-6 "$@"
+}
+```
+
+### Grok Build
+
+환경 변수를 설정하여 Grok Build를 게이트웨이에 연결 (Grok 모델 이름은 자동으로 Claude 모델에 매핑):
+
+```powershell
+# PowerShell profile
+function gg {
+    $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
+    $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # .env의 PROXY_API_KEY에 대응
+    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+}
+```
+
+Grok Build의 `grok-4` 등의 요청은 자동으로 `GROK_TARGET_MODEL` (기본값 `claude-opus-4.6`, `.env`에서 변경 가능)에 매핑됩니다.
+
+**Linux/macOS:**
+```bash
+gg() {
+    GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
+    GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
+    grok --disable-web-search "$@"
+}
+```
+
+### 기타 도구
+
+OpenAI 또는 Anthropic API를 지원하는 모든 도구가 연결 가능. 베이스 URL을 `http://localhost:8000` (Anthropic) 또는 `http://localhost:8000/v1` (OpenAI)로 설정하고, API 키를 `PROXY_API_KEY`로 설정하면 됩니다.
+
+---
+
 ## 📡 API 레퍼런스
 
 ### 엔드포인트

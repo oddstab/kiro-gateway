@@ -534,6 +534,68 @@ Leave `VPN_PROXY_URL` empty (default) if you don't need proxy support.
 
 ---
 
+## 🖥️ Usage with AI Coding Tools
+
+### Claude Code
+
+Set environment variables to point Claude Code at this gateway:
+
+```powershell
+# PowerShell profile (~\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1)
+function cc {
+    $env:ANTHROPIC_BASE_URL = 'http://localhost:8000'
+    $env:ANTHROPIC_API_KEY = 'kiro-gateway-local'  # matches PROXY_API_KEY in .env
+    & claude --model claude-opus-4-6 @args
+}
+```
+
+Usage:
+```powershell
+cc                     # interactive mode
+cc "fix this bug"      # direct prompt
+cc --model claude-sonnet-5 "quick answer"  # switch model on the fly
+```
+
+**Linux/macOS (bash/zsh):**
+```bash
+# ~/.bashrc or ~/.zshrc
+cc() {
+    ANTHROPIC_BASE_URL='http://localhost:8000' \
+    ANTHROPIC_API_KEY='kiro-gateway-local' \
+    claude --model claude-opus-4-6 "$@"
+}
+```
+
+### Grok Build
+
+Set environment variables to point Grok Build at this gateway (Grok model names auto-map to Claude models):
+
+```powershell
+# PowerShell profile
+function gg {
+    $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
+    $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # matches PROXY_API_KEY in .env
+    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+}
+```
+
+Grok Build requests like `grok-4` auto-map to `GROK_TARGET_MODEL` (defaults to `claude-opus-4.6`, configurable in `.env`).
+
+**Linux/macOS:**
+```bash
+gg() {
+    GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
+    GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
+    grok --disable-web-search "$@"
+}
+```
+
+### Other Tools
+
+Any tool supporting OpenAI or Anthropic API can connect. Point the base URL to `http://localhost:8000` (Anthropic) or `http://localhost:8000/v1` (OpenAI), and set the API key to your `PROXY_API_KEY`.
+
+---
+
 ## 📡 API Reference
 
 ### Endpoints
