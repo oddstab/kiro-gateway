@@ -51,7 +51,7 @@
 
 ```env
 # 기본값은 claude-opus-4-6[1m], 지원되는 모든 모델로 변경 가능
-GROK_TARGET_MODEL="claude-sonnet-5"
+GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 ```
 
 ### 오픈 모델

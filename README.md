@@ -51,7 +51,7 @@
 
 ```env
 # 預設為 claude-opus-4-6[1m]，可改為任何支援的模型
-GROK_TARGET_MODEL="claude-sonnet-5"
+GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 ```
 
 ### 開源模型
@@ -572,7 +572,7 @@ function gg {
 }
 ```
 
-Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4.6`，可在 `.env` 中修改）。
+Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4-6[1m]`，可在 `.env` 中修改）。
 
 **Linux/macOS:**
 ```bash
