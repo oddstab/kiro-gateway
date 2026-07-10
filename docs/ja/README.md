@@ -26,15 +26,16 @@
 
 ### Claude モデル
 
-| モデル | 説明 |
-|--------|------|
-| 🧠 Claude Opus 4.8 | 最新かつ最も高性能。複雑な推論、アーキテクチャ設計、エージェントタスクに最適 |
-| 🧠 Claude Opus 4.7 | 前世代フラッグシップ。深い分析とマルチステップ問題解決に優れる |
-| 🧠 Claude Opus 4.6 | コーディングと推論タスクの万能選手 |
-| 🚀 Claude Sonnet 5 | 最新のバランスモデル。コーディング、ライティング、汎用タスクに最適 |
-| 🚀 Claude Sonnet 4.5 | 高速かつ高性能。速度と品質の優れたバランス |
-| 📦 Claude Sonnet 4 | 前世代モデル。ほとんどのユースケースで依然として強力で信頼性が高い |
-| ⚡ Claude Haiku 4.5 | 超高速。クイックレスポンス、シンプルなタスク、チャットに最適 |
+| モデル | Context | コスト | リージョン | Free | Pro | Pro+ | Power |
+|--------|---------|--------|-----------|:----:|:---:|:----:|:-----:|
+| 🧠 Claude Opus 4.8 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.7 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.6 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 5 | 1M | 1.3x | us-east-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.6 | 1M | 1.3x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.5 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
 ### Grok 互換性
 
@@ -56,13 +57,13 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 
 ### オープンモデル
 
-| モデル | 説明 |
-|--------|------|
-| 💤 GLM-5 | オープンMoE（744B/40B活性）。複雑なシステムエンジニアリングと長期エージェントタスク |
-| 🐋 DeepSeek-V3.2 | オープンMoE（685B/37B活性）。コーディング、推論、一般タスクのバランス |
-| 🧩 MiniMax M2.5 | オープンMoE（230B/10B活性）。推論とタスク処理能力が向上した強化版 |
-| 🧩 MiniMax M2.1 | オープンMoE（230B/10B活性）。複雑なタスク、計画、マルチステップワークフロー |
-| 🤖 Qwen3-Coder-Next | オープンMoE（80B/3B活性）。コーディング重視、大規模プロジェクトに最適 |
+| モデル | Context | コスト | リージョン | Free | Pro | Pro+ | Power |
+|--------|---------|--------|-----------|:----:|:---:|:----:|:-----:|
+| 💤 GLM-5 | 200K | 0.5x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🐋 DeepSeek-V3.2 | 128K | 0.25x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.5 | 200K | 0.25x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
 > 💡 **スマートモデル解決:** どんなモデル名形式でも使用可能 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`、または `claude-sonnet-4-5-20250929` のようなバージョン付き名前も。ゲートウェイが自動的に正規化します。
 

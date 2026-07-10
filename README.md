@@ -26,15 +26,16 @@
 
 ### Claude 模型
 
-| 模型 | 說明 |
-|------|------|
-| 🧠 Claude Opus 4.8 | 最新、最強大。適合複雜推理、架構設計和自主代理任務 |
-| 🧠 Claude Opus 4.7 | 上一代旗艦。深度分析和多步驟問題求解的優秀選擇 |
-| 🧠 Claude Opus 4.6 | 全能型選手，程式開發和推理任務均表現出色 |
-| 🚀 Claude Sonnet 5 | 最新均衡模型。程式開發、寫作和通用任務的絕佳選擇 |
-| 🚀 Claude Sonnet 4.5 | 快速且強大。速度與品質的絕佳平衡 |
-| 📦 Claude Sonnet 4 | 上一代模型。大多數場景仍然強大可靠 |
-| ⚡ Claude Haiku 4.5 | 閃電般快速。適合快速回應、簡單任務和聊天 |
+| 模型 | Context | 成本 | 區域 | Free | Pro | Pro+ | Power |
+|------|---------|------|------|:----:|:---:|:----:|:-----:|
+| 🧠 Claude Opus 4.8 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.7 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.6 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 5 | 1M | 1.3x | us-east-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.6 | 1M | 1.3x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.5 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
 ### Grok 相容性
 
@@ -56,13 +57,13 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 
 ### 開源模型
 
-| 模型 | 說明 |
-|------|------|
-| 💤 GLM-5 | 開源 MoE（744B/40B 活躍）。複雜系統工程和長期自主代理任務 |
-| 🐋 DeepSeek-V3.2 | 開源 MoE（685B/37B 活躍）。程式開發、推理和通用任務均衡 |
-| 🧩 MiniMax M2.5 | 開源 MoE（230B/10B 活躍）。增強版，推理和任務處理能力更強 |
-| 🧩 MiniMax M2.1 | 開源 MoE（230B/10B 活躍）。複雜任務、規劃和多步驟工作流程 |
-| 🤖 Qwen3-Coder-Next | 開源 MoE（80B/3B 活躍）。程式開發導向，適合大型專案 |
+| 模型 | Context | 成本 | 區域 | Free | Pro | Pro+ | Power |
+|------|---------|------|------|:----:|:---:|:----:|:-----:|
+| 💤 GLM-5 | 200K | 0.5x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🐋 DeepSeek-V3.2 | 128K | 0.25x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.5 | 200K | 0.25x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
 > 💡 **智慧模型解析：** 使用任何模型名稱格式 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`，甚至版本化名稱如 `claude-sonnet-4-5-20250929`。閘道器會自動正規化。
 

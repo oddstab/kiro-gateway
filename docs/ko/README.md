@@ -26,15 +26,16 @@
 
 ### Claude 모델
 
-| 모델 | 설명 |
-|------|------|
-| 🧠 Claude Opus 4.8 | 최신, 최강 성능. 복잡한 추론, 아키텍처 설계, 에이전트 작업에 최적 |
-| 🧠 Claude Opus 4.7 | 이전 세대 플래그십. 깊은 분석과 다단계 문제 해결에 탁월 |
-| 🧠 Claude Opus 4.6 | 코딩과 추론 작업의 올라운더 |
-| 🚀 Claude Sonnet 5 | 최신 균형 모델. 코딩, 글쓰기, 범용 작업에 적합 |
-| 🚀 Claude Sonnet 4.5 | 빠르고 강력. 속도와 품질의 우수한 균형 |
-| 📦 Claude Sonnet 4 | 이전 세대. 대부분의 사용 사례에서 여전히 강력하고 신뢰할 수 있음 |
-| ⚡ Claude Haiku 4.5 | 번개처럼 빠름. 빠른 응답, 간단한 작업, 채팅에 완벽 |
+| 모델 | Context | 비용 | 리전 | Free | Pro | Pro+ | Power |
+|------|---------|------|------|:----:|:---:|:----:|:-----:|
+| 🧠 Claude Opus 4.8 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.7 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.6 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 5 | 1M | 1.3x | us-east-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.6 | 1M | 1.3x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.5 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
 ### Grok 호환성
 
@@ -56,13 +57,13 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 
 ### 오픈 모델
 
-| 모델 | 설명 |
-|------|------|
-| 💤 GLM-5 | 오픈 MoE（744B/40B 활성）. 복잡한 시스템 엔지니어링 및 장기 에이전트 작업 |
-| 🐋 DeepSeek-V3.2 | 오픈 MoE（685B/37B 활성）. 코딩, 추론 및 일반 작업 균형 |
-| 🧩 MiniMax M2.5 | 오픈 MoE（230B/10B 활성）. 향상된 추론 및 작업 처리 기능 |
-| 🧩 MiniMax M2.1 | 오픈 MoE（230B/10B 활성）. 복잡한 작업, 계획 및 다단계 워크플로우 |
-| 🤖 Qwen3-Coder-Next | 오픈 MoE（80B/3B 활성）. 코딩 중심, 대규모 프로젝트에 탁월 |
+| 모델 | Context | 비용 | 리전 | Free | Pro | Pro+ | Power |
+|------|---------|------|------|:----:|:---:|:----:|:-----:|
+| 💤 GLM-5 | 200K | 0.5x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🐋 DeepSeek-V3.2 | 128K | 0.25x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.5 | 200K | 0.25x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
 > 💡 **스마트 모델 해석:** 어떤 모델 이름 형식이든 사용 가능 — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름도. 게이트웨이가 자동으로 정규화합니다.
 
