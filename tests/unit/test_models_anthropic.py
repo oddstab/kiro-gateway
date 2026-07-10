@@ -1821,8 +1821,8 @@ class TestEmbeddedSystemMessageHoisting:
             ],
         )
         assert isinstance(req.system, list)
-        assert req.system[0]["text"] == "injected"
-        assert req.system[1]["text"] == "cached"
+        assert req.system[0].text == "injected"
+        assert req.system[1].text == "cached"
 
     def test_no_embedded_system_is_untouched(self):
         """Requests without embedded system messages are left unchanged."""
