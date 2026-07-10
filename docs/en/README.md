@@ -26,15 +26,16 @@ Made with ❤️ by [@oddstab](https://github.com/oddstab)
 
 ### Claude Models
 
-| Model | Description |
-|-------|-------------|
-| 🧠 Claude Opus 4.8 | Latest and most capable. Best for complex reasoning, architecture, and agentic tasks |
-| 🧠 Claude Opus 4.7 | Previous flagship. Excellent for deep analysis and multi-step problem solving |
-| 🧠 Claude Opus 4.6 | Strong all-rounder for coding and reasoning tasks |
-| 🚀 Claude Sonnet 5 | Latest balanced model. Great for coding, writing, and general-purpose tasks |
-| 🚀 Claude Sonnet 4.5 | Fast and capable. Excellent balance of speed and quality |
-| 📦 Claude Sonnet 4 | Previous generation. Still powerful and reliable for most use cases |
-| ⚡ Claude Haiku 4.5 | Lightning fast. Perfect for quick responses, simple tasks, and chat |
+| Model | Context | Cost | Region | Free | Pro | Pro+ | Power |
+|-------|---------|------|--------|:----:|:---:|:----:|:-----:|
+| 🧠 Claude Opus 4.8 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.7 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🧠 Claude Opus 4.6 | 1M | 2.2x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 5 | 1M | 1.3x | us-east-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.6 | 1M | 1.3x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
+| 🚀 Claude Sonnet 4.5 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
 ### Grok Compatibility
 
@@ -56,13 +57,13 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 
 ### Open Models
 
-| Model | Description |
-|-------|-------------|
-| 💤 GLM-5 | Open MoE (744B/40B active). Complex systems engineering and long-horizon agentic tasks |
-| 🐋 DeepSeek-V3.2 | Open MoE (685B/37B active). Balanced for coding, reasoning, and general tasks |
-| 🧩 MiniMax M2.5 | Open MoE (230B/10B active). Enhanced reasoning and task handling |
-| 🧩 MiniMax M2.1 | Open MoE (230B/10B active). Complex tasks, planning, and multi-step workflows |
-| 🤖 Qwen3-Coder-Next | Open MoE (80B/3B active). Coding-focused, great for large projects |
+| Model | Context | Cost | Region | Free | Pro | Pro+ | Power |
+|-------|---------|------|--------|:----:|:---:|:----:|:-----:|
+| 💤 GLM-5 | 200K | 0.5x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🐋 DeepSeek-V3.2 | 128K | 0.25x | us-east-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.5 | 200K | 0.25x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
+| 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
 > 💡 **Smart Model Resolution:** Use any model name format — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, or even versioned names like `claude-sonnet-4-5-20250929`. The gateway normalizes them automatically.
 
