@@ -186,14 +186,19 @@ class WebSearchParser:
                     buffering=False,
                 )
             else:
-                # No parseable results — emit as raw text
-                remaining = self.OPEN_TAG + buf_content + self._tail_buffer
+                # 無法解析成結果（例如 Grok 只吐了一句話就被截斷）。
+                # 絕不把 <web_search> 標籤原樣輸出給客戶端 — 剝掉標記後
+                # 把內部文字當普通內容送出，避免標籤洩漏到畫面上。
+                remaining = buf_content + self._tail_buffer
                 self._tail_buffer = ""
-                return WebSearchParseResult(regular_content=remaining)
+                return WebSearchParseResult(
+                    regular_content=remaining if remaining else None
+                )
 
         remaining = ""
         if self._in_tag:
-            remaining = self.OPEN_TAG + self._buffer
+            # 未閉合但 buffer 為空/僅空白 — 同樣剝掉標籤標記，不洩漏。
+            remaining = self._buffer
             self._in_tag = False
             self._buffer = ""
         if self._tail_buffer:
@@ -216,6 +221,19 @@ class WebSearchParser:
             if text[-i:] == tag[:i]:
                 return len(text) - i
         return None
+
+    @staticmethod
+    def _strip_markdown_bold(text: str) -> str:
+        """剝掉標題外圍的 markdown 粗體標記 (**...** 或 __...__)。
+
+        Grok 常把標題包成 `**Title**`，若原樣保留會讓客戶端顯示多餘的星號。
+        只移除成對包住整段的標記，中間的星號（如檔名）保持不動。
+        """
+        text = text.strip()
+        for marker in ("**", "__"):
+            if len(text) > 2 * len(marker) and text.startswith(marker) and text.endswith(marker):
+                return text[len(marker):-len(marker)].strip()
+        return text
 
     @staticmethod
     def _parse_search_content(content: str) -> tuple:
@@ -253,7 +271,8 @@ class WebSearchParser:
                     current.snippet = " ".join(snippet_lines).strip()
                     results.append(current)
                     snippet_lines = []
-                current = WebSearchResult(title=num_match.group(1).strip())
+                title = WebSearchParser._strip_markdown_bold(num_match.group(1).strip())
+                current = WebSearchResult(title=title)
                 continue
 
             if current is not None:
