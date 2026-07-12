@@ -1975,8 +1975,13 @@ class TestServerSideToolBlocks:
         result = convert_anthropic_content_to_text(content)
         assert result == "Searching..."
 
-    def test_extract_tool_uses_includes_server_tool_use(self):
-        """server_tool_use blocks are extracted as tool calls."""
+    def test_extract_tool_uses_skips_server_tool_use(self):
+        """server_tool_use blocks are NOT extracted as tool calls.
+        
+        They represent completed server-side operations. Converting them to tool_calls
+        causes Kiro to reject the request with "tool_use ids found without tool_result"
+        because the client never sends a matching tool_result for server-executed tools.
+        """
         content = [
             {
                 "type": "server_tool_use",
@@ -1986,10 +1991,29 @@ class TestServerSideToolBlocks:
             }
         ]
         tool_calls = extract_tool_uses_from_anthropic_content(content)
+        assert len(tool_calls) == 0
+
+    def test_extract_tool_uses_still_extracts_regular_tool_use(self):
+        """Regular tool_use blocks are still extracted normally."""
+        content = [
+            {
+                "type": "tool_use",
+                "id": "toolu_abc123",
+                "name": "get_weather",
+                "input": {"city": "Tokyo"},
+            },
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_xyz789",
+                "name": "web_search",
+                "input": {"query": "weather Tokyo"},
+            },
+        ]
+        tool_calls = extract_tool_uses_from_anthropic_content(content)
+        # Only regular tool_use is extracted, server_tool_use is skipped
         assert len(tool_calls) == 1
-        assert tool_calls[0]["id"] == "srvtoolu_abc123"
-        assert tool_calls[0]["function"]["name"] == "web_search"
-        assert tool_calls[0]["function"]["arguments"] == {"query": "test query"}
+        assert tool_calls[0]["id"] == "toolu_abc123"
+        assert tool_calls[0]["function"]["name"] == "get_weather"
 
     def test_full_conversion_with_server_side_tools(self):
         """End-to-end: request with server-side tool history converts without error."""
@@ -2056,9 +2080,13 @@ class TestServerSideToolBlocks:
         history = payload["conversationState"].get("history", [])
         assert len(history) > 0
 
-        # 驗證 web_search 的 tool call 被保留在 history 的 assistant message
+        # server_tool_use 不應該被轉成 toolUses（否則 Kiro 會因為缺 tool_result 而 400）
+        # assistant message 的 text content ("Let me search.") 仍應保留
         assistant_msgs = [h for h in history if "assistantResponseMessage" in h]
-        assert any(
-            "toolUses" in msg["assistantResponseMessage"]
-            for msg in assistant_msgs
-        )
+        for msg in assistant_msgs:
+            arm = msg["assistantResponseMessage"]
+            if "toolUses" in arm:
+                # 如果有 toolUses 殘留，不能是 server_tool_use 的 id
+                for tu in arm["toolUses"]:
+                    assert tu.get("toolUseId") != "srvtoolu_abc123", \
+                        "server_tool_use should NOT appear as toolUses (causes TOOL_USE_RESULT_MISMATCH)"

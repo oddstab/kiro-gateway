@@ -284,6 +284,13 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
             tool_input = getattr(block, "input", {})
 
         if block_type in ("tool_use", "server_tool_use") and tool_id and tool_name:
+            # server_tool_use represents a COMPLETED server-side operation (e.g. web_search
+            # that already executed). It must NOT be converted to a tool_call because:
+            # 1. The client won't (and shouldn't) send a tool_result for it
+            # 2. Kiro API requires every tool_use to have a following tool_result
+            # 3. Including it causes: "tool_use ids found without tool_result blocks" (400)
+            if block_type == "server_tool_use":
+                continue
             tool_calls.append(
                 {
                     "id": tool_id,
