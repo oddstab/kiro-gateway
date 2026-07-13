@@ -5,6 +5,7 @@ httpx
 loguru
 python-dotenv
 tiktoken
+duckduckgo-search
 
 # Testing dependencies
 pytest

@@ -238,7 +238,8 @@ async def stream_kiro_to_openai_internal(
                 # INTERCEPT web_search tool calls (Path B - MCP emulation)
                 if tool_name == "web_search":
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
-                    
+                    from kiro.web_search_duckduckgo import call_duckduckgo
+
                     logger.info("Intercepted web_search tool call (Path B - MCP emulation)")
                     
                     # Parse tool_input
@@ -256,9 +257,12 @@ async def stream_kiro_to_openai_internal(
                         # Continue with normal tool_use processing
                     else:
                         logger.debug(f"WebSearch query (Path B): {query}")
-                        
-                        # Call MCP API
-                        mcp_tool_use_id, results = await call_kiro_mcp_api(query, auth_manager)
+
+                        # Grok 無法用 Kiro MCP web_search，改走 DuckDuckGo
+                        if model.startswith("grok"):
+                            mcp_tool_use_id, results = await call_duckduckgo(query)
+                        else:
+                            mcp_tool_use_id, results = await call_kiro_mcp_api(query, auth_manager)
                         
                         if results is None:
                             logger.error("MCP API call failed for web_search")
