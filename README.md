@@ -850,15 +850,93 @@ DEBUG_MODE=errors
 
 ### 連線問題
 
-**錯誤：「Name or service not known」或 DNS 解析失敗**
+**錯誤：「Name or service not known」或 DNS 解析失敗（getaddrinfo failed）**
 
-Q API 端點在您的區域可能無法公開解析。使用 VPN 或代理：
+Kiro API 端點 `runtime.{region}.kiro.dev` **僅存在於 `us-east-1` 和 `eu-central-1`**。如果您的帳號認證區域是其他區域（例如 `ap-northeast-1`），必須將 `KIRO_API_REGION` 指向有部署的區域：
+
+```env
+# 認證區域（從您的憑證檔案自動偵測，通常不需手動設定）
+KIRO_REGION="ap-northeast-1"
+
+# API 區域（必須是有部署端點的區域）
+KIRO_API_REGION="us-east-1"
+```
+
+**驗證方式：** 用 `nslookup` 確認端點是否可解析：
+
+```bash
+nslookup runtime.us-east-1.kiro.dev      # ✅ 應該有回應
+nslookup runtime.eu-central-1.kiro.dev    # ✅ 應該有回應
+nslookup runtime.ap-northeast-1.kiro.dev  # ❌ 不存在
+```
+
+> 💡 **重點：** `KIRO_REGION`（認證用）和 `KIRO_API_REGION`（API 呼叫用）是兩個不同的設定。認證區域跟著您的帳號走，API 區域必須是 `us-east-1` 或 `eu-central-1`。
+
+如果確認端點可解析但仍無法連線，可能是網路限制，請使用 VPN 或代理：
 
 ```env
 VPN_PROXY_URL=http://127.0.0.1:7890
 ```
 
 詳情請參閱 [VPN/代理支援](#-vpn代理支援)。
+
+---
+
+### profileArn 問題
+
+**錯誤：「profileArn is required for this request.」（HTTP 400）**
+
+`runtime.kiro.dev` 端點要求所有請求都帶 `profileArn`，包括 Enterprise/AWS SSO 帳號。如果您的憑證檔案中沒有 `profileArn` 欄位，需要手動設定。
+
+**方法 1：從 Kiro IDE 日誌中取得（推薦）**
+
+Kiro IDE 的 `q-client.log` 中會記錄每次 API 呼叫使用的 profileArn：
+
+```
+# Windows
+%APPDATA%\Kiro\logs\<日期>\<window>\exthost\kiro.kiroAgent\q-client.log
+
+# macOS
+~/Library/Application Support/Kiro/logs/<日期>/<window>/exthost/kiro.kiroAgent/q-client.log
+
+# Linux
+~/.config/Kiro/logs/<日期>/<window>/exthost/kiro.kiroAgent/q-client.log
+```
+
+搜尋 `profileArn` 關鍵字：
+
+```bash
+# Windows PowerShell
+Select-String -Path "$env:APPDATA\Kiro\logs\*\*\exthost\kiro.kiroAgent\q-client.log" -Pattern "profileArn"
+
+# Linux/macOS
+grep -r "profileArn" ~/.config/Kiro/logs/ | head -5
+```
+
+您會看到類似這樣的內容：
+```
+"profileArn":"arn:aws:codewhisperer:us-east-1:123456789012:profile/XXXXXXXXXXXX"
+```
+
+**方法 2：從 Kiro IDE Developer Tools 攔截**
+
+1. 在 Kiro IDE 中開啟 Developer Tools（`Help → Toggle Developer Tools` 或 `Ctrl+Shift+I`）
+2. 切到 Network tab
+3. 在 Kiro 中發送一個 chat 訊息
+4. 找到發往 `runtime.*.kiro.dev` 的請求
+5. 查看 request body 中的 `profileArn` 欄位
+
+**方法 3：AWS Console**
+
+登入 AWS Console → 搜尋 **Amazon Q Developer** → 找到 Profile 頁面中的 ARN。
+
+**設定方式：**
+
+取得 profileArn 後，加入 `.env`：
+
+```env
+PROFILE_ARN="arn:aws:codewhisperer:us-east-1:123456789012:profile/XXXXXXXXXXXX"
+```
 
 ---
 
