@@ -42,6 +42,7 @@ from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
     FAKE_REASONING_HANDLING,
+    WEB_SEARCH_ENABLED,
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
@@ -235,8 +236,15 @@ async def stream_kiro_to_openai_internal(
                 # WebSearch Support - Path B: MCP Tool Emulation (Streaming Interception)
                 # ==============================================================================
                 
-                # INTERCEPT web_search tool calls (Path B - MCP emulation)
-                if tool_name == "web_search":
+                # INTERCEPT web_search tool calls (Path B - MCP emulation).
+                # Only when WEB_SEARCH_ENABLED; otherwise let the tool call flow
+                # back to the client untouched. For Grok Build this is required:
+                # Grok Build executes web_search with its own client-side tool
+                # (which hits POST /v1/responses -> kiro/grok_web_search.py and
+                # returns native Responses-format results). Intercepting here
+                # would swallow the tool call and emit <web_search> tagged text
+                # instead, overriding Grok Build's native behavior.
+                if WEB_SEARCH_ENABLED and tool_name == "web_search":
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
                     
                     logger.info("Intercepted web_search tool call (Path B - MCP emulation)")

@@ -52,7 +52,12 @@ from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search
+from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
+from kiro.grok_web_search import (
+    is_grok_web_search_request,
+    extract_query_from_responses_input,
+    build_responses_payload,
+)
 
 # Import debug_logger
 try:
@@ -155,6 +160,109 @@ async def get_models(request: Request):
     ]
     
     return ModelList(data=openai_models)
+
+
+@router.post("/v1/responses", dependencies=[Depends(verify_api_key)])
+@router.post("/responses", dependencies=[Depends(verify_api_key)])
+async def create_response(request: Request):
+    """OpenAI Responses API endpoint for Grok Build web_search.
+
+    Grok Build's client-side web_search tool posts here in OpenAI Responses
+    API format. We detect the web_search tool, run a real Kiro MCP search,
+    and return the results in the Responses shape Grok Build accepts. Only
+    web_search requests are supported on this endpoint.
+
+    Args:
+        request: FastAPI Request for accessing the raw body and app.state.
+
+    Returns:
+        JSONResponse with search results in OpenAI Responses API format.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "Invalid JSON body",
+                    "type": "invalid_request_error",
+                    "code": "invalid_json",
+                }
+            },
+        )
+
+    if not is_grok_web_search_request(body):
+        return JSONResponse(
+            status_code=501,
+            content={
+                "error": {
+                    "message": "Only web_search tool requests are supported on this endpoint.",
+                    "type": "not_implemented",
+                    "code": "unsupported_request",
+                }
+            },
+        )
+
+    model = body.get("model", "grok-4.20-multi-agent")
+    query = extract_query_from_responses_input(body)
+
+    if not query:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "No search query found in input",
+                    "type": "invalid_request_error",
+                    "code": "missing_query",
+                }
+            },
+        )
+
+    logger.info(f"Grok Build web_search request (Responses API): query={query!r}")
+
+    # Resolve an auth_manager for the Kiro MCP call. Prefer the account
+    # system's next available account; fall back to the first account (legacy).
+    account_manager = request.app.state.account_manager
+    if request.app.state.account_system:
+        account = await account_manager.get_next_account(model)
+        if account is None:
+            account = account_manager.get_first_account()
+    else:
+        account = account_manager.get_first_account()
+
+    if account is None or account.auth_manager is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": "No initialized accounts available for web search",
+                    "type": "api_error",
+                    "code": 503,
+                }
+            },
+        )
+
+    tool_use_id, results = await call_kiro_mcp_api(query, account.auth_manager)
+
+    if results is None:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": "Web search failed. Please try again.",
+                    "type": "api_error",
+                    "code": 502,
+                }
+            },
+        )
+
+    payload = build_responses_payload(model, query, results)
+    logger.info(
+        f"Grok Build web_search response: query={query!r}, "
+        f"results={len(results.get('results', []))}"
+    )
+    return JSONResponse(content=payload)
 
 
 @router.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
