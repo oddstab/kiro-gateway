@@ -398,16 +398,28 @@ class TestModelsEndpoint:
         for model in native_models:
             options = model["reasoningEfforts"]
             assert [option["id"] for option in options] == [
-                "max",
-                "high",
-                "medium",
+                "none",
                 "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ]
+            assert [option["label"] for option in options] == [
+                "None",
+                "Low",
+                "Medium",
+                "High",
+                "xHigh",
+                "Max",
             ]
             assert [option["value"] for option in options] == [
-                "xhigh",
-                "high",
-                "medium",
+                "none",
+                "minimal",
                 "low",
+                "medium",
+                "high",
+                "xhigh",
             ]
 
 

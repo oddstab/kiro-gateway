@@ -137,7 +137,7 @@ class TestOpenAIModel:
                 ReasoningEffortOption(
                     id="max",
                     value="xhigh",
-                    label="max",
+                    label="Max",
                     description="Maximum Kiro reasoning",
                 )
             ],
@@ -150,7 +150,7 @@ class TestOpenAIModel:
             {
                 "id": "max",
                 "value": "xhigh",
-                "label": "max",
+                "label": "Max",
                 "description": "Maximum Kiro reasoning",
                 "default": False,
             }

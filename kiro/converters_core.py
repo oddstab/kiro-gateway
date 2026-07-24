@@ -185,11 +185,20 @@ def get_native_reasoning_format(
 
 
 def normalize_native_reasoning_effort(effort: Any) -> Any:
-    """Map OpenAI's highest reasoning effort alias to Kiro's native value."""
-    if effort == "xhigh":
-        logger.debug("Mapped native reasoning effort: Grok/OpenAI xhigh -> Kiro max")
-        return "max"
-    return effort
+    """Map OpenAI/Grok effort ranks to Kiro's native effort vocabulary."""
+    effort_map = {
+        "minimal": "low",
+        "low": "medium",
+        "medium": "high",
+        "high": "xhigh",
+        "xhigh": "max",
+    }
+    normalized = effort_map.get(effort, effort)
+    if normalized != effort:
+        logger.debug(
+            f"Mapped native reasoning effort: Grok/OpenAI {effort} -> Kiro {normalized}"
+        )
+    return normalized
 
 
 # ==================================================================================================

@@ -62,32 +62,44 @@ from kiro.grok_web_search import (
 )
 
 
-# Grok displays option labels/ids, but sends the canonical OpenAI value.
-# The gateway maps xhigh to Kiro's native max value at request conversion time.
+# Grok displays Kiro labels/ids, while each value uses Grok's canonical
+# six-level enum. Conversion preserves rank across the two vocabularies.
 KIRO_REASONING_EFFORT_OPTIONS = [
     ReasoningEffortOption(
-        id="max",
-        value="xhigh",
-        label="max",
-        description="Maximum Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="high",
-        value="high",
-        label="high",
-        description="High Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="medium",
-        value="medium",
-        label="medium",
-        description="Medium Kiro reasoning",
+        id="none",
+        value="none",
+        label="None",
+        description="Disable Kiro reasoning",
     ),
     ReasoningEffortOption(
         id="low",
-        value="low",
-        label="low",
+        value="minimal",
+        label="Low",
         description="Low Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="medium",
+        value="low",
+        label="Medium",
+        description="Medium Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="high",
+        value="medium",
+        label="High",
+        description="High Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="xhigh",
+        value="high",
+        label="xHigh",
+        description="Extra-high Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="max",
+        value="xhigh",
+        label="Max",
+        description="Maximum Kiro reasoning",
     ),
 ]
 

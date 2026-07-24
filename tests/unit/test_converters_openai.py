@@ -1891,7 +1891,7 @@ class TestBuildKiroPayloadIntegration:
         print("Checking native Claude reasoning fields...")
         assert payload["additionalModelRequestFields"] == {
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": "medium"},
+            "output_config": {"effort": "high"},
         }
         assert "<thinking_mode>" not in content
 
@@ -1924,33 +1924,49 @@ class TestNativeReasoningPayloads:
         assert "<thinking_mode>" not in content
 
     @pytest.mark.parametrize(
-        ("model", "model_info", "expected_fields"),
+        ("model", "model_info", "effort_container"),
         [
             (
                 "gpt-5.6",
                 {"additionalModelRequestFieldsSchema": {"properties": {"reasoning": {}}}},
-                {"reasoning": {"effort": "max"}},
+                "reasoning",
             ),
             (
                 "claude-opus-4.8",
                 {"additionalModelRequestFieldsSchema": {"properties": {"output_config": {}}}},
-                {
-                    "thinking": {"type": "adaptive", "display": "summarized"},
-                    "output_config": {"effort": "max"},
-                },
+                "output_config",
             ),
         ],
     )
-    def test_maps_grok_xhigh_to_kiro_max(self, model, model_info, expected_fields):
+    @pytest.mark.parametrize(
+        ("grok_effort", "kiro_effort"),
+        [
+            ("minimal", "low"),
+            ("low", "medium"),
+            ("medium", "high"),
+            ("high", "xhigh"),
+            ("xhigh", "max"),
+            ("max", "max"),
+        ],
+    )
+    def test_maps_grok_effort_ranks_to_kiro(
+        self,
+        model,
+        model_info,
+        effort_container,
+        grok_effort,
+        kiro_effort,
+    ):
         request = ChatCompletionRequest(
             model=model,
             messages=[ChatMessage(role="user", content="Solve this")],
-            reasoning_effort="xhigh",
+            reasoning_effort=grok_effort,
         )
 
-        payload = build_kiro_payload(request, "conv-max", "", model_info)
+        payload = build_kiro_payload(request, "conv-effort", "", model_info)
 
-        assert payload["additionalModelRequestFields"] == expected_fields
+        native_fields = payload["additionalModelRequestFields"]
+        assert native_fields[effort_container]["effort"] == kiro_effort
 
     def test_uses_claude_native_schema_for_reasoning_effort(self):
         request = ChatCompletionRequest(
@@ -1968,7 +1984,7 @@ class TestNativeReasoningPayloads:
 
         assert payload["additionalModelRequestFields"] == {
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": "high"},
+            "output_config": {"effort": "xhigh"},
         }
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
