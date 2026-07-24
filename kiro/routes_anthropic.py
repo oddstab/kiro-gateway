@@ -379,11 +379,17 @@ async def messages(
             # profileArn is required by runtime.kiro.dev for all auth types
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
             
+            model_resolution = model_resolver.resolve(request_data.model)
+            model_info = (
+                model_cache.get(model_resolution.normalized)
+                or model_cache.get(model_resolution.internal_id)
+            )
             try:
                 kiro_payload = anthropic_to_kiro(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    model_info=model_info,
                 )
             except ValueError as e:
                 logger.error(f"Conversion error: {e}")
@@ -687,11 +693,17 @@ async def messages(
     # profileArn is required by runtime.kiro.dev for all auth types
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
     
+    model_resolution = model_resolver.resolve(request_data.model)
+    model_info = (
+        model_cache.get(model_resolution.normalized)
+        or model_cache.get(model_resolution.internal_id)
+    )
     try:
         kiro_payload = anthropic_to_kiro(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            model_info=model_info,
         )
     except ValueError as e:
         logger.error(f"Conversion error: {e}")

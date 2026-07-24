@@ -348,6 +348,7 @@ class AnthropicMessagesRequest(BaseModel):
 
     # Extended thinking (official Anthropic parameter)
     thinking: Optional[Dict[str, Any]] = None
+    output_config: Optional[Dict[str, Any]] = None
 
     # Tools
     tools: Optional[List[AnthropicTool]] = None

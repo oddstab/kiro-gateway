@@ -1833,3 +1833,40 @@ class TestStreamWithFirstTokenRetryCore:
         assert make_request_call_count == 1
         assert len(chunks) == 1
         print("✓ make_request called immediately when initial_response is None")
+
+
+class TestNativeReasoningStreaming:
+    """Regression tests for structured native reasoning events."""
+
+    @pytest.mark.asyncio
+    async def test_native_reasoning_bypasses_fake_parser(self):
+        parser = MagicMock()
+        parser.feed.return_value = [
+            {
+                "type": "reasoning",
+                "data": {"text": "Native thought", "signature": "sig-native"},
+            },
+            {"type": "content", "data": "<thinking>must stay final content</thinking>"},
+        ]
+        fake_parser = MagicMock()
+
+        events = [
+            event
+            async for event in _process_chunk(
+                parser,
+                b"chunk",
+                fake_parser,
+                WebSearchParser(),
+            )
+        ]
+
+        assert events == [
+            KiroEvent(
+                type="thinking",
+                thinking_content="Native thought",
+                reasoning_signature="sig-native",
+            ),
+            KiroEvent(type="content", content="<thinking>must stay final content</thinking>"),
+        ]
+        assert parser.native_reasoning_seen is True
+        fake_parser.feed.assert_not_called()

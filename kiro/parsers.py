@@ -27,6 +27,7 @@ Contains classes and functions for:
 - Content deduplication
 """
 
+import codecs
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -217,6 +218,7 @@ class AwsEventStreamParser:
     
     Supported event types:
     - content: Text content of response
+    - reasoning: Native model reasoning text and optional signature
     - tool_start: Start of tool call (name, toolUseId)
     - tool_input: Continuation of input for tool call
     - tool_stop: End of tool call
@@ -237,7 +239,10 @@ class AwsEventStreamParser:
         ...         print(event["data"])
     """
     
-    # Patterns for finding JSON events
+    REASONING_EVENT_MARKER = "reasoningContentEvent"
+
+    # Patterns for finding JSON events. Native reasoning is handled separately
+    # because {"text": ...} is not unique without its event-type header.
     EVENT_PATTERNS = [
         ('{"content":', 'content'),
         ('{"name":', 'tool_start'),
@@ -251,7 +256,9 @@ class AwsEventStreamParser:
     def __init__(self):
         """Initializes the parser."""
         self.buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
         self.last_content: Optional[str] = None  # For deduplicating repeating content
+        self.native_reasoning_seen = False
         self.current_tool_call: Optional[Dict[str, Any]] = None
         self.tool_calls: List[Dict[str, Any]] = []
     
@@ -266,8 +273,8 @@ class AwsEventStreamParser:
             List of events in {"type": str, "data": Any} format
         """
         try:
-            self.buffer += chunk.decode('utf-8', errors='ignore')
-        except Exception:
+            self.buffer += self._decoder.decode(chunk)
+        except UnicodeError:
             return []
         
         events = []
@@ -282,6 +289,15 @@ class AwsEventStreamParser:
                 if pos != -1 and (earliest_pos == -1 or pos < earliest_pos):
                     earliest_pos = pos
                     earliest_type = event_type
+
+            # Scope {"text": ...} parsing to a reasoningContentEvent frame so
+            # unrelated AWS events with a text field are never misclassified.
+            marker_pos = self.buffer.find(self.REASONING_EVENT_MARKER)
+            if marker_pos != -1:
+                reasoning_pos = self.buffer.find('{"text":', marker_pos)
+                if reasoning_pos != -1 and (earliest_pos == -1 or reasoning_pos < earliest_pos):
+                    earliest_pos = reasoning_pos
+                    earliest_type = "reasoning"
             
             if earliest_pos == -1:
                 break
@@ -318,6 +334,14 @@ class AwsEventStreamParser:
         """
         if event_type == 'content':
             return self._process_content_event(data)
+        elif event_type == 'reasoning':
+            return {
+                "type": "reasoning",
+                "data": {
+                    "text": data.get("text", ""),
+                    "signature": data.get("signature"),
+                },
+            }
         elif event_type == 'tool_start':
             return self._process_tool_start_event(data)
         elif event_type == 'tool_input':
@@ -564,6 +588,8 @@ class AwsEventStreamParser:
     def reset(self) -> None:
         """Resets parser state."""
         self.buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
         self.last_content = None
+        self.native_reasoning_seen = False
         self.current_tool_call = None
         self.tool_calls = []

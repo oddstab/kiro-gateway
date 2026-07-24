@@ -74,12 +74,16 @@ class ChatMessage(BaseModel):
         name: Optional sender name
         tool_calls: List of tool calls (for assistant)
         tool_call_id: Tool call ID (for tool)
+        reasoning_content: Assistant reasoning text for conversation history
+        reasoning_signature: Optional upstream signature for reasoning history
     """
     role: str
     content: Optional[Union[str, List[Any], Any]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[Any]] = None
     tool_call_id: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    reasoning_signature: Optional[str] = None
     
     model_config = {"extra": "allow"}
 
@@ -164,9 +168,12 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     
-    # Reasoning (OpenAI reasoning models)
-    # Supports all official reasoning_effort levels from OpenAI API
+    # Reasoning (OpenAI reasoning models and Kiro-compatible extensions)
+    # Supports all official reasoning_effort levels from OpenAI API.
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    thinking: Optional[Dict[str, Any]] = None
+    output_config: Optional[Dict[str, Any]] = None
+    reasoning: Optional[Dict[str, Any]] = None
     
     # Tools (function calling)
     tools: Optional[List[Tool]] = None

@@ -1667,3 +1667,65 @@ class TestStreamingAnthropicTruncationDetection:
         # Should detect truncation and set max_tokens
         assert result["stop_reason"] == "max_tokens"
         print("✓ collect_anthropic_response detects truncation correctly")
+
+
+class TestNativeReasoningSignature:
+    """Regression tests for preserving native Kiro reasoning signatures."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_uses_upstream_signature(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(
+                type="thinking",
+                thinking_content="Native thought",
+                reasoning_signature="sig-native",
+            )
+            yield KiroEvent(type="content", content="Answer")
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                with patch("kiro.streaming_anthropic.FAKE_REASONING_HANDLING", "as_reasoning_content"):
+                    async for event in stream_kiro_to_anthropic(
+                        mock_response,
+                        "claude-sonnet-4.5",
+                        mock_model_cache,
+                        mock_auth_manager,
+                    ):
+                        events.append(event)
+
+        thinking_start = next(
+            event for event in events
+            if '"type": "thinking"' in event and "content_block_start" in event
+        )
+        assert '"signature": "sig-native"' in thinking_start
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_uses_upstream_signature(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        from kiro.streaming_core import StreamResult
+        from kiro.streaming_anthropic import collect_anthropic_response
+
+        result = StreamResult(
+            content="Answer",
+            thinking_content="Native thought",
+            reasoning_signature="sig-native",
+            context_usage_percentage=1.0,
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=result):
+            with patch("kiro.streaming_anthropic.FAKE_REASONING_HANDLING", "as_reasoning_content"):
+                response = await collect_anthropic_response(
+                    mock_response,
+                    "claude-sonnet-4.5",
+                    mock_model_cache,
+                    mock_auth_manager,
+                )
+
+        assert response["content"][0] == {
+            "type": "thinking",
+            "thinking": "Native thought",
+            "signature": "sig-native",
+        }

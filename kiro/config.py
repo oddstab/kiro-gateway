@@ -423,6 +423,16 @@ def _warn_timeout_configuration():
         print(warning_text, file=sys.stderr)
 
 # ==================================================================================================
+# Reasoning Settings
+# ==================================================================================================
+
+# Prefer Kiro's native reasoning protocol when the client requests reasoning and
+# the selected model exposes a supported additionalModelRequestFields schema.
+# Disable this to force the existing prompt-based fallback.
+_NATIVE_REASONING_RAW: str = os.getenv("NATIVE_REASONING", "").lower()
+NATIVE_REASONING_ENABLED: bool = _NATIVE_REASONING_RAW not in ("false", "0", "no", "disabled", "off")
+
+# ==================================================================================================
 # Fake Reasoning Settings (Extended Thinking via Tag Injection)
 # ==================================================================================================
 

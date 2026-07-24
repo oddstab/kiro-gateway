@@ -261,6 +261,9 @@ async def stream_kiro_to_anthropic(
             elif event.type == "thinking":
                 thinking_content = event.thinking_content or ""
                 full_thinking_content += thinking_content
+                reasoning_signature = event.reasoning_signature
+                block_was_started = thinking_block_started
+                thinking_signature = reasoning_signature or thinking_signature
                 
                 # Handle thinking content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
@@ -286,6 +289,16 @@ async def stream_kiro_to_anthropic(
                                 "type": "thinking_delta",
                                 "thinking": thinking_content
                             }
+                        })
+
+                    if reasoning_signature and block_was_started:
+                        yield format_sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": thinking_block_index,
+                            "delta": {
+                                "type": "signature_delta",
+                                "signature": reasoning_signature,
+                            },
                         })
                 
                 elif FAKE_REASONING_HANDLING == "include_as_text":
@@ -846,7 +859,7 @@ async def collect_anthropic_response(
         content_blocks.append({
             "type": "thinking",
             "thinking": result.thinking_content,
-            "signature": generate_thinking_signature()
+            "signature": result.reasoning_signature or generate_thinking_signature()
         })
     
     # Add text block if there's content

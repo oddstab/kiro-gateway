@@ -434,11 +434,17 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             # profileArn is required by runtime.kiro.dev for all auth types
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
             
+            model_resolution = model_resolver.resolve(request_data.model)
+            model_info = (
+                model_cache.get(model_resolution.normalized)
+                or model_cache.get(model_resolution.internal_id)
+            )
             try:
                 kiro_payload = build_kiro_payload(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    model_info=model_info,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
@@ -682,11 +688,17 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # profileArn is required by runtime.kiro.dev for all auth types
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
     
+    model_resolution = model_resolver.resolve(request_data.model)
+    model_info = (
+        model_cache.get(model_resolution.normalized)
+        or model_cache.get(model_resolution.internal_id)
+    )
     try:
         kiro_payload = build_kiro_payload(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            model_info=model_info,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

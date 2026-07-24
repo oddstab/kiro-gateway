@@ -1357,3 +1357,51 @@ class TestTruncationRecoveryIntegration:
         
         print("Checking: Third tool call NOT marked as truncated...")
         assert aws_event_parser.tool_calls[2].get("_truncation_detected") is not True
+
+
+class TestNativeReasoningEvents:
+    """Regression tests for Kiro reasoningContentEvent frames."""
+
+    def test_parses_reasoning_with_signature(self):
+        parser = AwsEventStreamParser()
+        chunk = (
+            b":event-type\x07\x00\x15reasoningContentEvent"
+            b":content-type\x07\x00\x10application/json"
+            b'{"text":"Think","signature":"sig-123"}'
+        )
+
+        assert parser.feed(chunk) == [{
+            "type": "reasoning",
+            "data": {"text": "Think", "signature": "sig-123"},
+        }]
+
+    def test_parses_fragmented_reasoning_frame(self):
+        parser = AwsEventStreamParser()
+
+        assert parser.feed(b":event-type reasoningCont") == []
+        assert parser.feed(b'entEvent application/json {"te') == []
+        assert parser.feed(b'xt":"I should check this"}') == [{
+            "type": "reasoning",
+            "data": {"text": "I should check this", "signature": None},
+        }]
+
+    def test_does_not_parse_unscoped_text_event(self):
+        parser = AwsEventStreamParser()
+
+        events = parser.feed(b'{"text":"not reasoning"}{"content":"answer"}')
+
+        assert events == [{"type": "content", "data": "answer"}]
+
+    def test_preserves_utf8_split_across_byte_chunks(self):
+        parser = AwsEventStreamParser()
+        payload = (
+            ":event-type reasoningContentEvent application/json "
+            '{"text":"先檢查"}'
+        ).encode("utf-8")
+        split_at = payload.index("先".encode("utf-8")) + 1
+
+        assert parser.feed(payload[:split_at]) == []
+        assert parser.feed(payload[split_at:]) == [{
+            "type": "reasoning",
+            "data": {"text": "先檢查", "signature": None},
+        }]

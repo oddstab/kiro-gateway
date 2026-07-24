@@ -3787,6 +3787,22 @@ class TestBuildKiroHistory:
         assert len(result) == 1
         assert "assistantResponseMessage" in result[0]
         assert result[0]["assistantResponseMessage"]["content"] == "Hi there"
+
+    def test_omits_unsigned_assistant_reasoning(self):
+        """Unsigned reasoning must not be sent because Kiro rejects it."""
+        messages = [
+            UnifiedMessage(
+                role="assistant",
+                content="Answer",
+                reasoning_content="Reasoning without a signature",
+            )
+        ]
+
+        result = build_kiro_history(messages, "claude-sonnet-4")
+
+        assistant = result[0]["assistantResponseMessage"]
+        assert assistant["content"] == "Answer"
+        assert "reasoningContent" not in assistant
     
     def test_expects_normalized_roles_only(self):
         """

@@ -44,6 +44,7 @@ from kiro.converters_core import (
     UnifiedMessage,
     UnifiedTool,
     ThinkingConfig,
+    get_native_reasoning_format,
     build_kiro_payload as core_build_kiro_payload,
 )
 
@@ -225,7 +226,9 @@ def convert_openai_messages_to_unified(messages: List[ChatMessage]) -> Tuple[str
                 content=extract_text_content(msg.content),
                 tool_calls=tool_calls,
                 tool_results=tool_results,
-                images=images
+                images=images,
+                reasoning_content=msg.reasoning_content if msg.role == "assistant" else None,
+                reasoning_signature=msg.reasoning_signature if msg.role == "assistant" else None,
             )
             processed.append(unified_msg)
     
@@ -328,61 +331,88 @@ def reasoning_effort_to_budget(max_tokens: int, effort: str) -> int:
     return int(max_tokens * percent[effort])
 
 
-def extract_thinking_config_from_openai(request: ChatCompletionRequest) -> ThinkingConfig:
+def extract_thinking_config_from_openai(
+    request: ChatCompletionRequest,
+    model_id: str = "",
+    model_info: Optional[Dict[str, Any]] = None,
+) -> ThinkingConfig:
     """
-    Extract thinking configuration from OpenAI request.
-    
-    Handles reasoning_effort parameter:
-    - "none" → disabled (no thinking tags injected)
-    - "minimal", "low", "medium", "high", "xhigh" → enabled with percentage-based budget
-    - None (not specified) → enabled with default budget
-    
+    Extract native reasoning fields or configure the prompt-based fallback.
+
+    Native fields are emitted only when the client explicitly requests
+    reasoning. Model metadata is preferred; hidden/static models use the
+    verified Claude/GPT-5.6 family fallback in get_native_reasoning_format().
+
     Args:
         request: OpenAI ChatCompletionRequest
-    
+        model_id: Resolved Kiro model ID
+        model_info: Optional ListAvailableModels metadata
+
     Returns:
-        ThinkingConfig for core layer
-    
-    Examples:
-        >>> # No reasoning_effort specified → use defaults
-        >>> request = ChatCompletionRequest(model="claude-sonnet-4.5", messages=[...])
-        >>> extract_thinking_config_from_openai(request)
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Explicitly disabled
-        >>> request.reasoning_effort = "none"
-        >>> extract_thinking_config_from_openai(request)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Custom budget from reasoning_effort
-        >>> request.reasoning_effort = "high"
-        >>> request.max_tokens = 4096
-        >>> extract_thinking_config_from_openai(request)
-        ThinkingConfig(enabled=True, budget_tokens=3276)  # 80% of 4096
+        ThinkingConfig for the core layer
     """
+    thinking = request.thinking if isinstance(request.thinking, dict) else None
+    output_config = request.output_config if isinstance(request.output_config, dict) else None
+    reasoning = request.reasoning if isinstance(request.reasoning, dict) else None
+
+    if request.reasoning_effort == "none" or (thinking and thinking.get("type") == "disabled"):
+        return ThinkingConfig(enabled=False)
+
+    native_requested = any(
+        value is not None
+        for value in (request.reasoning_effort, thinking, output_config, reasoning)
+    )
+    native_format = (
+        get_native_reasoning_format(model_id, model_info)
+        if native_requested
+        else None
+    )
+
+    if native_format == "reasoning":
+        native_reasoning = dict(reasoning or {})
+        effort = (
+            native_reasoning.get("effort")
+            or (output_config or {}).get("effort")
+            or request.reasoning_effort
+        )
+        if effort and effort != "none":
+            native_reasoning["effort"] = effort
+        if native_reasoning:
+            return ThinkingConfig(
+                enabled=True,
+                native_fields={"reasoning": native_reasoning},
+            )
+
+    if native_format == "output_config":
+        native_thinking = dict(thinking or {})
+        thinking_type = native_thinking.pop("type", None)
+        native_thinking.pop("budget_tokens", None)
+        native_thinking["type"] = "adaptive" if thinking_type in (None, "enabled") else thinking_type
+        native_thinking.setdefault("display", "summarized")
+
+        native_output_config = dict(output_config or {})
+        effort = (
+            native_output_config.get("effort")
+            or (reasoning or {}).get("effort")
+            or request.reasoning_effort
+        )
+        if effort and effort != "none":
+            native_output_config["effort"] = effort
+
+        native_fields: Dict[str, Any] = {"thinking": native_thinking}
+        if native_output_config:
+            native_fields["output_config"] = native_output_config
+        return ThinkingConfig(enabled=True, native_fields=native_fields)
+
     if not request.reasoning_effort:
-        # No reasoning_effort specified → use defaults
         return ThinkingConfig(enabled=True, budget_tokens=None)
-    
-    if request.reasoning_effort == "none":
-        # Explicitly disabled
-        return ThinkingConfig(enabled=False, budget_tokens=None)
-    
-    # Calculate budget from reasoning_effort
-    # Get max_tokens from request (OUTPUT tokens limit)
-    max_tokens = request.max_tokens or request.max_completion_tokens
-    if not max_tokens:
-        # Fallback to reasonable default for OUTPUT tokens
-        # NOT DEFAULT_MAX_INPUT_TOKENS (200000) - that's for INPUT
-        max_tokens = 4096  # Standard output limit
-    
+
+    max_tokens = request.max_tokens or request.max_completion_tokens or 4096
     budget = reasoning_effort_to_budget(max_tokens, request.reasoning_effort)
-    
     logger.debug(
-        f"Extracted thinking config from OpenAI: reasoning_effort='{request.reasoning_effort}', "
+        f"Using fake reasoning fallback: reasoning_effort='{request.reasoning_effort}', "
         f"max_tokens={max_tokens}, budget={budget}"
     )
-    
     return ThinkingConfig(enabled=True, budget_tokens=budget)
 
 
@@ -393,7 +423,8 @@ def extract_thinking_config_from_openai(request: ChatCompletionRequest) -> Think
 def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
-    profile_arn: str
+    profile_arn: str,
+    model_info: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     Builds complete payload for Kiro API from OpenAI request.
@@ -405,6 +436,7 @@ def build_kiro_payload(
         request_data: Request in OpenAI format
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
+        model_info: Optional ListAvailableModels metadata for capability detection
     
     Returns:
         Payload dictionary for POST request to Kiro API
@@ -423,8 +455,12 @@ def build_kiro_payload(
     resolved_model = MODEL_ALIASES.get(request_data.model, request_data.model)
     model_id = get_model_id_for_kiro(resolved_model, HIDDEN_MODELS)
     
-    # Extract thinking configuration from reasoning_effort
-    thinking_config = extract_thinking_config_from_openai(request_data)
+    # Prefer native Kiro reasoning when explicitly requested and supported.
+    thinking_config = extract_thinking_config_from_openai(
+        request_data,
+        model_id=model_id,
+        model_info=model_info,
+    )
     
     logger.debug(
         f"Converting OpenAI request: model={request_data.model} -> {model_id}, "

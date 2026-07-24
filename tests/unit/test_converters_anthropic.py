@@ -1881,9 +1881,11 @@ class TestAnthropicToKiroIntegration:
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         content = user_input["content"]
 
-        print(f"Checking for <max_thinking_length>6000</max_thinking_length>...")
-        assert "<max_thinking_length>6000</max_thinking_length>" in content
-        assert "<thinking_mode>enabled</thinking_mode>" in content
+        print("Checking native Claude reasoning fields...")
+        assert payload["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive", "display": "summarized"}
+        }
+        assert "<thinking_mode>" not in content
 
 
 # ==================================================================================================
@@ -2090,3 +2092,53 @@ class TestServerSideToolBlocks:
                 for tu in arm["toolUses"]:
                     assert tu.get("toolUseId") != "srvtoolu_abc123", \
                         "server_tool_use should NOT appear as toolUses (causes TOOL_USE_RESULT_MISMATCH)"
+
+
+class TestAnthropicNativeReasoningPayloads:
+    """Regression tests for Anthropic-to-Kiro native reasoning conversion."""
+
+    def test_uses_native_reasoning_without_fake_tags(self):
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="Solve this")],
+            max_tokens=4096,
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            output_config={"effort": "high"},
+        )
+        model_info = {
+            "additionalModelRequestFieldsSchema": {
+                "properties": {"output_config": {"type": "object"}}
+            }
+        }
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = anthropic_to_kiro(request, "conv-native", "", model_info)
+
+        assert payload["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "high"},
+        }
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+
+    def test_round_trips_anthropic_thinking_history(self):
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                AnthropicMessage(role="user", content="Question"),
+                AnthropicMessage(role="assistant", content=[
+                    {"type": "thinking", "thinking": "Reasoning", "signature": "sig-history"},
+                    {"type": "text", "text": "Answer"},
+                ]),
+                AnthropicMessage(role="user", content="Next"),
+            ],
+            max_tokens=4096,
+        )
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+            payload = anthropic_to_kiro(request, "conv-history", "")
+
+        assistant = payload["conversationState"]["history"][1]["assistantResponseMessage"]
+        assert assistant["reasoningContent"] == {
+            "reasoningText": {"text": "Reasoning", "signature": "sig-history"}
+        }
