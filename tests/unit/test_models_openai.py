@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from kiro.models_openai import (
     # Model listing
     OpenAIModel,
+    ReasoningEffortOption,
     ModelList,
     # Chat messages
     ChatMessage,
@@ -126,6 +127,34 @@ class TestOpenAIModel:
         
         print(f"Comparing description: Expected None, Got {model.description}")
         assert model.description is None
+
+    def test_serializes_grok_reasoning_effort_metadata_with_camel_case_aliases(self):
+        """Grok model extensions must use the field names its parser expects."""
+        model = OpenAIModel(
+            id="claude-opus-4.8",
+            supports_reasoning_effort=True,
+            reasoning_efforts=[
+                ReasoningEffortOption(
+                    id="max",
+                    value="xhigh",
+                    label="Max",
+                    description="Maximum Kiro reasoning",
+                )
+            ],
+        )
+
+        payload = model.model_dump(by_alias=True)
+
+        assert payload["supportsReasoningEffort"] is True
+        assert payload["reasoningEfforts"] == [
+            {
+                "id": "max",
+                "value": "xhigh",
+                "label": "Max",
+                "description": "Maximum Kiro reasoning",
+                "default": False,
+            }
+        ]
 
 
 # ==================================================================================================
@@ -1065,12 +1094,12 @@ class TestReasoningEffort:
     
     def test_reasoning_effort_valid_values(self):
         """
-        What it does: Verifies all 6 reasoning_effort values are accepted
-        Purpose: Ensure Pydantic validates all official OpenAI reasoning_effort levels
+        What it does: Verifies all supported reasoning_effort values are accepted
+        Purpose: Include OpenAI levels and Kiro's native max extension
         """
         print("Testing all valid reasoning_effort values...")
         
-        for effort in ["none", "minimal", "low", "medium", "high", "xhigh"]:
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"]:
             print(f"  Testing reasoning_effort='{effort}'...")
             request = ChatCompletionRequest(
                 model="claude-sonnet-4.5",

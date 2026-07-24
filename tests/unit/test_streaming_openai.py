@@ -420,7 +420,16 @@ class TestStreamingOpenaiThinkingContent:
                         chunks.append(chunk)
         
         print(f"Received {len(chunks)} chunks")
-        
+
+        payloads = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            for chunk in chunks
+            if chunk.startswith("data: ") and "[DONE]" not in chunk
+        ]
+        assert payloads[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+        assert payloads[1]["choices"][0]["delta"] == {"reasoning_content": "Let me think..."}
+        assert payloads[2]["choices"][0]["delta"] == {"content": "Here is my answer"}
+
         # Should have reasoning_content
         reasoning_chunks = [c for c in chunks if '"reasoning_content"' in c]
         assert len(reasoning_chunks) >= 1

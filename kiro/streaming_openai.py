@@ -42,6 +42,7 @@ from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
     FAKE_REASONING_HANDLING,
+    WEB_SEARCH_ENABLED,
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
@@ -158,16 +159,25 @@ async def stream_kiro_to_openai_internal(
             elif event.type == "thinking" and event.thinking_content:
                 # Accumulate thinking content
                 full_thinking_content += event.thinking_content
-                
+
+                # Emit opening chunk before first reasoning delta so clients
+                # that expect a clean role+content initialization see it.
+                if first_chunk:
+                    opening_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
+                    }
+                    yield f"data: {json.dumps(opening_chunk, ensure_ascii=False)}\n\n"
+                    first_chunk = False
+
                 # Send as reasoning_content or content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
                     delta = {"reasoning_content": event.thinking_content}
                 else:
                     delta = {"content": event.thinking_content}
-                
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
                 
                 openai_chunk = {
                     "id": completion_id,
@@ -235,8 +245,15 @@ async def stream_kiro_to_openai_internal(
                 # WebSearch Support - Path B: MCP Tool Emulation (Streaming Interception)
                 # ==============================================================================
                 
-                # INTERCEPT web_search tool calls (Path B - MCP emulation)
-                if tool_name == "web_search":
+                # INTERCEPT web_search tool calls (Path B - MCP emulation).
+                # Only when WEB_SEARCH_ENABLED; otherwise let the tool call flow
+                # back to the client untouched. For Grok Build this is required:
+                # Grok Build executes web_search with its own client-side tool
+                # (which hits POST /v1/responses -> kiro/grok_web_search.py and
+                # returns native Responses-format results). Intercepting here
+                # would swallow the tool call and emit <web_search> tagged text
+                # instead, overriding Grok Build's native behavior.
+                if WEB_SEARCH_ENABLED and tool_name == "web_search":
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
                     from kiro.web_search_duckduckgo import call_duckduckgo
 
@@ -460,6 +477,7 @@ async def stream_kiro_to_openai_internal(
         yield "data: [DONE]\n\n"
         
     except FirstTokenTimeoutError:
+        streaming_error_occurred = True
         # Propagate timeout up for retry
         raise
     except GeneratorExit:

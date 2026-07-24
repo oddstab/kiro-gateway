@@ -39,6 +39,7 @@ from kiro.converters_core import (
     UnifiedMessage,
     UnifiedTool,
     ThinkingConfig,
+    get_native_reasoning_format,
     build_kiro_payload,
     extract_text_content,
     extract_images_from_content,
@@ -82,6 +83,26 @@ def convert_anthropic_content_to_text(content: Any) -> str:
         return "".join(text_parts)
 
     return str(content) if content else ""
+
+
+def extract_reasoning_from_anthropic_content(content: Any) -> tuple[Optional[str], Optional[str]]:
+    """Extract thinking text and signature from assistant content blocks."""
+    if not isinstance(content, list):
+        return None, None
+
+    parts: List[str] = []
+    signature: Optional[str] = None
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "thinking":
+                parts.append(str(block.get("thinking", "")))
+                signature = block.get("signature") or signature
+        elif getattr(block, "type", None) == "thinking":
+            parts.append(str(getattr(block, "thinking", "")))
+            signature = getattr(block, "signature", None) or signature
+
+    text = "".join(parts)
+    return (text or None), signature
 
 
 def _extract_web_search_result_text(block: dict) -> str:
@@ -246,8 +267,6 @@ def extract_images_from_tool_results(content: Any) -> List[Dict[str, Any]]:
 
     return images
 
-    return tool_results
-
 
 def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any]]:
     """
@@ -341,10 +360,13 @@ def convert_anthropic_messages(
         tool_calls = None
         tool_results = None
         images = None
+        reasoning_content = None
+        reasoning_signature = None
 
         if role == "assistant":
-            # Assistant messages may contain tool_use blocks
+            # Assistant messages may contain tool_use and thinking blocks.
             tool_calls = extract_tool_uses_from_anthropic_content(content)
+            reasoning_content, reasoning_signature = extract_reasoning_from_anthropic_content(content)
             if tool_calls:
                 total_tool_calls += len(tool_calls)
 
@@ -375,6 +397,8 @@ def convert_anthropic_messages(
             tool_calls=tool_calls if tool_calls else None,
             tool_results=tool_results if tool_results else None,
             images=images if images else None,
+            reasoning_content=reasoning_content,
+            reasoning_signature=reasoning_signature,
         )
         unified_messages.append(unified_msg)
 
@@ -422,64 +446,54 @@ def convert_anthropic_tools(
     return unified_tools if unified_tools else None
 
 
-def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) -> ThinkingConfig:
-    """
-    Extract thinking configuration from Anthropic request.
-    
-    Handles thinking parameter:
-    - {"type": "enabled", "budget_tokens": N} → enabled with budget
-    - {"type": "disabled"} → disabled
-    - None → enabled with default budget
-    
-    Args:
-        request: Anthropic MessagesRequest
-    
-    Returns:
-        ThinkingConfig for core layer
-    
-    Examples:
-        >>> # No thinking specified → use defaults
-        >>> request = AnthropicMessagesRequest(model="claude-sonnet-4.5", messages=[...], max_tokens=4096)
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Explicitly disabled
-        >>> request.thinking = {"type": "disabled"}
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Enabled with custom budget
-        >>> request.thinking = {"type": "enabled", "budget_tokens": 8000}
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=True, budget_tokens=8000)
-    """
-    if not request.thinking:
-        # No thinking specified → use defaults
-        return ThinkingConfig(enabled=True, budget_tokens=None)
-    
-    if not isinstance(request.thinking, dict):
-        # Invalid format → use defaults
-        return ThinkingConfig(enabled=True, budget_tokens=None)
-    
-    thinking_type = request.thinking.get("type")
-    
-    if thinking_type == "disabled":
-        # Explicitly disabled
-        return ThinkingConfig(enabled=False, budget_tokens=None)
-    
-    if thinking_type == "enabled":
-        # Extract budget_tokens
-        budget = request.thinking.get("budget_tokens")
-        if budget:
-            logger.debug(f"Extracted thinking config from Anthropic: type='enabled', budget={budget}")
-        return ThinkingConfig(enabled=True, budget_tokens=budget)
-    
-    # Unknown type → use defaults
-    return ThinkingConfig(enabled=True, budget_tokens=None)
+def extract_thinking_config_from_anthropic(
+    request: AnthropicMessagesRequest,
+    model_id: str = "",
+    model_info: Optional[Dict[str, Any]] = None,
+) -> ThinkingConfig:
+    """Extract native Kiro reasoning fields or configure the fake fallback."""
+    thinking = request.thinking if isinstance(request.thinking, dict) else None
+    output_config = request.output_config if isinstance(request.output_config, dict) else None
+
+    if thinking and thinking.get("type") == "disabled":
+        return ThinkingConfig(enabled=False)
+
+    native_requested = thinking is not None or output_config is not None
+    native_format = (
+        get_native_reasoning_format(model_id, model_info)
+        if native_requested
+        else None
+    )
+
+    if native_format == "output_config":
+        native_thinking = dict(thinking or {})
+        thinking_type = native_thinking.pop("type", None)
+        native_thinking.pop("budget_tokens", None)
+        native_thinking["type"] = "adaptive" if thinking_type in (None, "enabled") else thinking_type
+        native_thinking.setdefault("display", "summarized")
+        native_output_config = dict(output_config or {})
+        native_fields: Dict[str, Any] = {"thinking": native_thinking}
+        if native_output_config:
+            native_fields["output_config"] = native_output_config
+        return ThinkingConfig(enabled=True, native_fields=native_fields)
+
+    if native_format == "reasoning" and output_config and output_config.get("effort"):
+        return ThinkingConfig(
+            enabled=True,
+            native_fields={"reasoning": {"effort": output_config["effort"]}},
+        )
+
+    budget = thinking.get("budget_tokens") if thinking else None
+    if budget:
+        logger.debug(f"Using fake reasoning fallback with budget={budget}")
+    return ThinkingConfig(enabled=True, budget_tokens=budget)
 
 
 def anthropic_to_kiro(
-    request: AnthropicMessagesRequest, conversation_id: str, profile_arn: str
+    request: AnthropicMessagesRequest,
+    conversation_id: str,
+    profile_arn: str,
+    model_info: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     Converts Anthropic Messages API request to Kiro API payload.
@@ -517,8 +531,12 @@ def anthropic_to_kiro(
     resolved_model = MODEL_ALIASES.get(request.model, request.model)
     model_id = get_model_id_for_kiro(resolved_model, HIDDEN_MODELS)
 
-    # Extract thinking configuration from thinking parameter
-    thinking_config = extract_thinking_config_from_anthropic(request)
+    # Prefer native Kiro reasoning when explicitly requested and supported.
+    thinking_config = extract_thinking_config_from_anthropic(
+        request,
+        model_id=model_id,
+        model_info=model_info,
+    )
 
     logger.debug(
         f"Converting Anthropic request: model={request.model} -> {model_id}, "

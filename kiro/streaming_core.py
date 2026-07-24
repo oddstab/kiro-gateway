@@ -72,6 +72,7 @@ class KiroEvent:
         type: Event type (content, thinking, tool_use, web_search, usage, context_usage, error)
         content: Text content (for content events)
         thinking_content: Thinking/reasoning content (for thinking events)
+        reasoning_signature: Optional native Kiro reasoning signature
         tool_use: Tool use data (for tool_use events)
         web_search: Web search results data (for web_search events)
         usage: Usage/metering data (for usage events)
@@ -82,6 +83,7 @@ class KiroEvent:
     type: str
     content: Optional[str] = None
     thinking_content: Optional[str] = None
+    reasoning_signature: Optional[str] = None
     tool_use: Optional[Dict[str, Any]] = None
     web_search: Optional[Dict[str, Any]] = None
     usage: Optional[Dict[str, Any]] = None
@@ -98,6 +100,7 @@ class StreamResult:
     Attributes:
         content: Full text content
         thinking_content: Full thinking/reasoning content
+        reasoning_signature: Optional native Kiro reasoning signature
         tool_calls: List of tool calls
         web_searches: List of web search results from <web_search> tags
         usage: Usage information
@@ -105,6 +108,7 @@ class StreamResult:
     """
     content: str = ""
     thinking_content: str = ""
+    reasoning_signature: Optional[str] = None
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     web_searches: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
@@ -114,6 +118,26 @@ class StreamResult:
 class FirstTokenTimeoutError(Exception):
     """Exception raised when first token timeout occurs."""
     pass
+
+
+async def prefetch_stream(
+    stream: AsyncGenerator[str, None],
+) -> AsyncGenerator[str, None]:
+    """Read the first chunk before HTTP response headers are committed."""
+    try:
+        first_chunk = await anext(stream)
+    except StopAsyncIteration as exc:
+        raise FirstTokenTimeoutError("Upstream stream ended before the first response chunk") from exc
+
+    async def replay() -> AsyncGenerator[str, None]:
+        try:
+            yield first_chunk
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return replay()
 
 
 # ==================================================================================================
@@ -169,10 +193,9 @@ async def parse_kiro_stream(
         except asyncio.TimeoutError:
             logger.warning(f"[FirstTokenTimeout] Model did not respond within {first_token_timeout}s")
             raise FirstTokenTimeoutError(f"No response within {first_token_timeout} seconds")
-        except StopAsyncIteration:
-            # Empty response - this is normal, just finish
-            logger.debug("Empty response from Kiro API")
-            return
+        except StopAsyncIteration as exc:
+            logger.warning("[FirstTokenTimeout] Kiro API returned an empty response stream")
+            raise FirstTokenTimeoutError("Kiro API returned an empty response stream") from exc
         
         # Process first chunk
         if debug_logger:
@@ -295,8 +318,8 @@ async def _process_chunk(
         if event["type"] == "content":
             content = event["data"]
 
-            # Process through thinking parser if enabled
-            if thinking_parser:
+            # Process through the fake parser only until native reasoning is seen.
+            if thinking_parser and getattr(parser, "native_reasoning_seen", False) is not True:
                 parse_result = thinking_parser.feed(content)
 
                 # Yield thinking content if any
@@ -322,6 +345,15 @@ async def _process_chunk(
                 # No thinking parser - pass through web search parser
                 async for ev in _emit_through_ws_parser(content, ws_parser):
                     yield ev
+
+        elif event["type"] == "reasoning":
+            parser.native_reasoning_seen = True
+            reasoning_data = event["data"]
+            yield KiroEvent(
+                type="thinking",
+                thinking_content=reasoning_data.get("text", ""),
+                reasoning_signature=reasoning_data.get("signature"),
+            )
 
         elif event["type"] == "usage":
             yield KiroEvent(type="usage", usage=event["data"])
@@ -362,6 +394,7 @@ async def collect_stream_to_result(
             full_content_for_bracket_tools += event.content
         elif event.type == "thinking" and event.thinking_content:
             result.thinking_content += event.thinking_content
+            result.reasoning_signature = event.reasoning_signature or result.reasoning_signature
             full_content_for_bracket_tools += event.thinking_content
         elif event.type == "tool_use" and event.tool_use:
             result.tool_calls.append(event.tool_use)
@@ -504,9 +537,14 @@ async def stream_with_first_token_retry(
                     raise Exception(f"Upstream API error ({response.status_code}): {error_text}")
             
             # Try to stream with first token timeout
+            chunk_received = False
             async for chunk in stream_processor(response):
+                chunk_received = True
                 yield chunk
-            
+
+            if not chunk_received:
+                raise FirstTokenTimeoutError("Upstream stream ended before the first response chunk")
+
             # Successfully completed - exit
             return
             

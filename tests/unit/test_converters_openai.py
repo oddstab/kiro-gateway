@@ -754,6 +754,26 @@ class TestBuildKiroPayload:
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert current_content == "(empty placeholder)"
+
+    def test_omits_unsigned_reasoning_when_assistant_is_last_message(self):
+        """Unsigned current assistant reasoning must not produce invalid Kiro history."""
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4-5",
+            messages=[
+                ChatMessage(role="user", content="Hello"),
+                ChatMessage(
+                    role="assistant",
+                    content="Answer",
+                    reasoning_content="Reasoning without a signature",
+                ),
+            ],
+        )
+
+        result = build_kiro_payload(request, "conv-unsigned", "")
+
+        assistant = result["conversationState"]["history"][-1]["assistantResponseMessage"]
+        assert assistant["content"] == "Answer"
+        assert "reasoningContent" not in assistant
     
     def test_raises_for_empty_messages(self):
         """
@@ -1868,7 +1888,155 @@ class TestBuildKiroPayloadIntegration:
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         content = user_input["content"]
         
-        expected_budget = int(8000 * 0.50)  # medium = 50%
-        print(f"Checking for <max_thinking_length>{expected_budget}</max_thinking_length>...")
-        assert f"<max_thinking_length>{expected_budget}</max_thinking_length>" in content
+        print("Checking native Claude reasoning fields...")
+        assert payload["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "high"},
+        }
+        assert "<thinking_mode>" not in content
+
+
+class TestNativeReasoningPayloads:
+    """Regression tests for Kiro native reasoning request conversion."""
+
+    def test_translates_grok_gpt_fields_to_native_reasoning(self):
+        request = ChatCompletionRequest(
+            model="gpt-5.6",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            thinking={"type": "adaptive"},
+            output_config={"effort": "max"},
+            reasoning={"mode": "standard"},
+        )
+        model_info = {
+            "additionalModelRequestFieldsSchema": {
+                "properties": {"reasoning": {"type": "object"}}
+            }
+        }
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(request, "conv-native", "arn:test", model_info)
+
+        assert payload["additionalModelRequestFields"] == {
+            "reasoning": {"effort": "max", "mode": "standard"}
+        }
+        assert payload["agentMode"] == "vibe"
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+
+    @pytest.mark.parametrize(
+        ("model", "model_info", "effort_container"),
+        [
+            (
+                "gpt-5.6",
+                {"additionalModelRequestFieldsSchema": {"properties": {"reasoning": {}}}},
+                "reasoning",
+            ),
+            (
+                "claude-opus-4.8",
+                {"additionalModelRequestFieldsSchema": {"properties": {"output_config": {}}}},
+                "output_config",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("grok_effort", "kiro_effort"),
+        [
+            ("minimal", "low"),
+            ("low", "medium"),
+            ("medium", "high"),
+            ("high", "xhigh"),
+            ("xhigh", "max"),
+            ("max", "max"),
+        ],
+    )
+    def test_maps_grok_effort_ranks_to_kiro(
+        self,
+        model,
+        model_info,
+        effort_container,
+        grok_effort,
+        kiro_effort,
+    ):
+        request = ChatCompletionRequest(
+            model=model,
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort=grok_effort,
+        )
+
+        payload = build_kiro_payload(request, "conv-effort", "", model_info)
+
+        native_fields = payload["additionalModelRequestFields"]
+        assert native_fields[effort_container]["effort"] == kiro_effort
+
+    def test_uses_claude_native_schema_for_reasoning_effort(self):
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort="high",
+        )
+        model_info = {
+            "additionalModelRequestFieldsSchema": {
+                "properties": {"output_config": {"type": "object"}}
+            }
+        }
+
+        payload = build_kiro_payload(request, "conv-native", "", model_info)
+
+        assert payload["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "xhigh"},
+        }
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+
+    def test_unknown_model_uses_fake_fallback(self):
+        request = ChatCompletionRequest(
+            model="unknown-model",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort="high",
+        )
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(request, "conv-fallback", "")
+
+        assert "additionalModelRequestFields" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" in content
+
+    def test_round_trips_openai_reasoning_history(self):
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[
+                ChatMessage(role="user", content="Question"),
+                ChatMessage(
+                    role="assistant",
+                    content="Answer",
+                    reasoning_content="Reasoning",
+                    reasoning_signature="sig-history",
+                ),
+                ChatMessage(role="user", content="Next"),
+            ],
+        )
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+            payload = build_kiro_payload(request, "conv-history", "")
+
+        assistant = payload["conversationState"]["history"][1]["assistantResponseMessage"]
+        assert assistant["reasoningContent"] == {
+            "reasoningText": {"text": "Reasoning", "signature": "sig-history"}
+        }
+
+    def test_native_reasoning_can_be_disabled(self):
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort="high",
+        )
+
+        with patch("kiro.converters_core.NATIVE_REASONING_ENABLED", False):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+                payload = build_kiro_payload(request, "conv-fallback", "")
+
+        assert "additionalModelRequestFields" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>enabled</thinking_mode>" in content

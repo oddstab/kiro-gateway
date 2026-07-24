@@ -37,6 +37,7 @@ import uuid
 from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional, Any
 
 import httpx
+from fastapi import HTTPException
 from loguru import logger
 
 from kiro.streaming_core import (
@@ -261,6 +262,9 @@ async def stream_kiro_to_anthropic(
             elif event.type == "thinking":
                 thinking_content = event.thinking_content or ""
                 full_thinking_content += thinking_content
+                reasoning_signature = event.reasoning_signature
+                block_was_started = thinking_block_started
+                thinking_signature = reasoning_signature or thinking_signature
                 
                 # Handle thinking content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
@@ -286,6 +290,16 @@ async def stream_kiro_to_anthropic(
                                 "type": "thinking_delta",
                                 "thinking": thinking_content
                             }
+                        })
+
+                    if reasoning_signature and block_was_started:
+                        yield format_sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": thinking_block_index,
+                            "delta": {
+                                "type": "signature_delta",
+                                "signature": reasoning_signature,
+                            },
                         })
                 
                 elif FAKE_REASONING_HANDLING == "include_as_text":
@@ -778,15 +792,6 @@ async def stream_kiro_to_anthropic(
         error_type = type(e).__name__
         error_msg = str(e) if str(e) else "(empty message)"
         logger.error(f"Error during Anthropic streaming: [{error_type}] {error_msg}", exc_info=True)
-        
-        # Send error event
-        yield format_sse_event("error", {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": f"Internal error: {error_msg}"
-            }
-        })
         raise
     finally:
         try:
@@ -846,7 +851,7 @@ async def collect_anthropic_response(
         content_blocks.append({
             "type": "thinking",
             "thinking": result.thinking_content,
-            "signature": generate_thinking_signature()
+            "signature": result.reasoning_signature or generate_thinking_signature()
         })
     
     # Add text block if there's content
@@ -1009,25 +1014,19 @@ async def stream_with_first_token_retry_anthropic(
     Raises:
         Exception with Anthropic error format after exhausting all attempts
     """
-    def create_http_error(status_code: int, error_text: str) -> Exception:
-        """Create exception for HTTP errors in Anthropic format."""
-        return Exception(json.dumps({
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": f"Upstream API error: {error_text}"
-            }
-        }))
-    
-    def create_timeout_error(retries: int, timeout: float) -> Exception:
-        """Create exception for timeout errors in Anthropic format."""
-        return Exception(json.dumps({
-            "type": "error",
-            "error": {
-                "type": "timeout_error",
-                "message": f"Model did not respond within {timeout}s after {retries} attempts. Please try again."
-            }
-        }))
+    def create_http_error(status_code: int, error_text: str) -> HTTPException:
+        """Create an HTTP error before streaming response headers are sent."""
+        return HTTPException(
+            status_code=status_code,
+            detail=f"Upstream API error: {error_text}",
+        )
+
+    def create_timeout_error(retries: int, timeout: float) -> HTTPException:
+        """Create a gateway timeout before streaming response headers are sent."""
+        return HTTPException(
+            status_code=504,
+            detail=f"Model did not respond within {timeout}s after {retries} attempts. Please try again.",
+        )
     
     async def stream_processor(response: httpx.Response) -> AsyncGenerator[str, None]:
         """Process response and yield Anthropic SSE chunks."""

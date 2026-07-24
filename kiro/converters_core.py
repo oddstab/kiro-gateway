@@ -31,13 +31,14 @@ to convert their formats to Kiro API format.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
 from kiro.config import (
     TOOL_DESCRIPTION_MAX_LENGTH,
+    NATIVE_REASONING_ENABLED,
     FAKE_REASONING_ENABLED,
     FAKE_REASONING_MAX_TOKENS,
     FAKE_REASONING_BUDGET_CAP,
@@ -54,30 +55,29 @@ from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 @dataclass
 class ThinkingConfig:
     """
-    Unified thinking configuration for fake reasoning.
-    
-    This configuration is created by API-specific adapters (OpenAI, Anthropic)
-    and passed to the core layer for thinking tag injection.
-    
+    Unified reasoning configuration.
+
+    Native reasoning uses Kiro's additionalModelRequestFields protocol. Fake
+    reasoning remains available only as a fallback for unsupported models.
+
     Attributes:
-        enabled: Whether to inject thinking tags into the request
-        budget_tokens: Token budget for thinking (None = use FAKE_REASONING_MAX_TOKENS default)
-    
-    Examples:
-        >>> # Default configuration (enabled with default budget)
-        >>> ThinkingConfig()
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Disabled by client (reasoning_effort="none" or thinking.type="disabled")
-        >>> ThinkingConfig(enabled=False, budget_tokens=None)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Custom budget from client
-        >>> ThinkingConfig(enabled=True, budget_tokens=8000)
-        ThinkingConfig(enabled=True, budget_tokens=8000)
+        enabled: Whether reasoning is requested
+        budget_tokens: Token budget used by the fake fallback
+        native_fields: Kiro native additionalModelRequestFields, when supported
     """
     enabled: bool = True
     budget_tokens: Optional[int] = None
+    native_fields: Optional[Dict[str, Any]] = None
+
+    @property
+    def uses_native_reasoning(self) -> bool:
+        """Return whether this request uses Kiro native reasoning."""
+        return bool(self.enabled and self.native_fields)
+
+    @property
+    def uses_fake_reasoning(self) -> bool:
+        """Return whether this request should use the prompt-based fallback."""
+        return bool(self.enabled and not self.native_fields)
 
 
 @dataclass
@@ -95,12 +95,16 @@ class UnifiedMessage:
         tool_results: List of tool results (for user messages with tool responses)
         images: List of images in unified format (for multimodal user messages)
                 Format: [{"media_type": "image/jpeg", "data": "base64..."}]
+        reasoning_content: Assistant reasoning text for Kiro history
+        reasoning_signature: Optional Kiro reasoning signature
     """
     role: str
     content: Any = ""
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_results: Optional[List[Dict[str, Any]]] = None
     images: Optional[List[Dict[str, Any]]] = None
+    reasoning_content: Optional[str] = None
+    reasoning_signature: Optional[str] = None
 
 
 @dataclass
@@ -129,6 +133,72 @@ class KiroPayloadResult:
     """
     payload: Dict[str, Any]
     tool_documentation: str = ""
+
+
+def get_native_reasoning_format(
+    model_id: str,
+    model_info: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Determine the Kiro native reasoning schema for a model.
+
+    Dynamic model metadata is authoritative when it includes
+    additionalModelRequestFieldsSchema. Family fallback is used only when that
+    schema is absent, which covers hidden and static model definitions.
+
+    Args:
+        model_id: Resolved Kiro model ID
+        model_info: Optional model metadata from ListAvailableModels
+
+    Returns:
+        "reasoning" for GPT-style fields, "output_config" for Claude-style
+        fields, or None when native reasoning is unavailable
+    """
+    if not NATIVE_REASONING_ENABLED:
+        return None
+
+    schema: Any = None
+    if model_info:
+        schema = model_info.get("additionalModelRequestFieldsSchema")
+        if isinstance(schema, str):
+            try:
+                schema = json.loads(schema)
+            except json.JSONDecodeError:
+                logger.warning("Ignoring invalid additionalModelRequestFieldsSchema JSON")
+                return None
+
+    if isinstance(schema, dict):
+        properties = schema.get("properties", {})
+        if isinstance(properties, dict):
+            if "reasoning" in properties:
+                return "reasoning"
+            if "output_config" in properties:
+                return "output_config"
+        return None
+
+    normalized = model_id.lower().replace("_", "-")
+    if "gpt-5-6" in normalized or "gpt-5.6" in normalized:
+        return "reasoning"
+    if "claude" in normalized:
+        return "output_config"
+    return None
+
+
+def normalize_native_reasoning_effort(effort: Any) -> Any:
+    """Map OpenAI/Grok effort ranks to Kiro's native effort vocabulary."""
+    effort_map = {
+        "minimal": "low",
+        "low": "medium",
+        "medium": "high",
+        "high": "xhigh",
+        "xhigh": "max",
+    }
+    normalized = effort_map.get(effort, effort)
+    if normalized != effort:
+        logger.debug(
+            f"Mapped native reasoning effort: Grok/OpenAI {effort} -> Kiro {normalized}"
+        )
+    return normalized
 
 
 # ==================================================================================================
@@ -384,6 +454,10 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
         >>> inject_thinking_tags("Hello", ThinkingConfig(enabled=True, budget_tokens=8000))
         '<thinking_mode>enabled</thinking_mode>\\n<max_thinking_length>8000</max_thinking_length>...Hello'
     """
+    # Native reasoning must never be combined with prompt-based reasoning.
+    if thinking_config.uses_native_reasoning:
+        return content
+
     # Check if thinking is enabled globally
     if not FAKE_REASONING_ENABLED:
         return content
@@ -410,6 +484,8 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     
     # Thinking instruction to improve reasoning quality
     thinking_instruction = (
+        "Output format is mandatory. Start your response with exactly <thinking> and do not output any text before it. "
+        "Put your reasoning inside that block, close it with </thinking>, and only then provide the final answer.\n\n"
         "Think in English for better reasoning quality.\n\n"
         "Your thinking process should be thorough and systematic:\n"
         "- First, make sure you fully understand what is being asked\n"
@@ -1109,12 +1185,18 @@ def merge_adjacent_messages(messages: List[UnifiedMessage]) -> List[UnifiedMessa
                 current_text = extract_text_content(msg.content)
                 last.content = f"{last_text}\n{current_text}"
             
-            # Merge tool_calls for assistant messages
-            if msg.role == "assistant" and msg.tool_calls:
-                if last.tool_calls is None:
-                    last.tool_calls = []
-                last.tool_calls = list(last.tool_calls) + list(msg.tool_calls)
-                total_tool_calls_merged += len(msg.tool_calls)
+            # Merge tool_calls and reasoning for assistant messages
+            if msg.role == "assistant":
+                if msg.tool_calls:
+                    if last.tool_calls is None:
+                        last.tool_calls = []
+                    last.tool_calls = list(last.tool_calls) + list(msg.tool_calls)
+                    total_tool_calls_merged += len(msg.tool_calls)
+                if msg.reasoning_content:
+                    last.reasoning_content = (
+                        f"{last.reasoning_content or ''}{msg.reasoning_content}"
+                    )
+                    last.reasoning_signature = msg.reasoning_signature or last.reasoning_signature
             
             # Merge tool_results for user messages
             if msg.role == "user" and msg.tool_results:
@@ -1387,6 +1469,18 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
                 content = "(empty placeholder)"
             
             assistant_response = {"content": content}
+
+            if msg.reasoning_content and msg.reasoning_signature:
+                assistant_response["reasoningContent"] = {
+                    "reasoningText": {
+                        "text": msg.reasoning_content,
+                        "signature": msg.reasoning_signature,
+                    }
+                }
+            elif msg.reasoning_content:
+                logger.debug(
+                    "Omitted unsigned reasoning from assistant history because Kiro requires a signature"
+                )
             
             # Process tool_calls
             tool_uses = extract_tool_uses_from_message(msg.content, msg.tool_calls)
@@ -1443,8 +1537,12 @@ def build_kiro_payload(
     if tool_documentation:
         full_system_prompt = full_system_prompt + tool_documentation if full_system_prompt else tool_documentation.strip()
     
-    # Add thinking mode legitimization to system prompt if enabled
-    thinking_system_addition = get_thinking_system_prompt_addition()
+    # Add prompt-based reasoning instructions only for the fallback path.
+    thinking_system_addition = (
+        get_thinking_system_prompt_addition()
+        if thinking_config.uses_fake_reasoning
+        else ""
+    )
     if thinking_system_addition:
         full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
     
@@ -1505,11 +1603,19 @@ def build_kiro_payload(
     # If current message is assistant, need to add it to history
     # and create user message placeholder
     if current_message.role == "assistant":
-        history.append({
-            "assistantResponseMessage": {
-                "content": current_content
+        assistant_response: Dict[str, Any] = {"content": current_content}
+        if current_message.reasoning_content and current_message.reasoning_signature:
+            assistant_response["reasoningContent"] = {
+                "reasoningText": {
+                    "text": current_message.reasoning_content,
+                    "signature": current_message.reasoning_signature,
+                }
             }
-        })
+        elif current_message.reasoning_content:
+            logger.debug(
+                "Omitted unsigned reasoning from current assistant message because Kiro requires a signature"
+            )
+        history.append({"assistantResponseMessage": assistant_response})
         current_content = "(empty placeholder)"
     
     # If content is empty - use placeholder
@@ -1583,6 +1689,10 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
+
+    if thinking_config.uses_native_reasoning:
+        payload["agentMode"] = "vibe"
+        payload["additionalModelRequestFields"] = thinking_config.native_fields
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:

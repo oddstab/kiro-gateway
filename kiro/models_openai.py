@@ -34,17 +34,42 @@ from pydantic import BaseModel, Field
 # Models for /v1/models endpoint
 # ==================================================================================================
 
+class ReasoningEffortOption(BaseModel):
+    """Provider-specific reasoning effort option advertised to Grok Build."""
+
+    id: str
+    value: str
+    label: str
+    description: Optional[str] = None
+    default: bool = False
+
+
 class OpenAIModel(BaseModel):
     """
     Data model for describing an AI model in OpenAI format.
     
-    Used in the /v1/models endpoint response.
+    Used in the /v1/models endpoint response. Grok-specific reasoning fields
+    are optional extensions ignored by standard OpenAI clients.
     """
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "anthropic"
     description: Optional[str] = None
+    supports_reasoning_effort: bool = Field(
+        default=False,
+        alias="supportsReasoningEffort",
+    )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        alias="reasoningEffort",
+    )
+    reasoning_efforts: List[ReasoningEffortOption] = Field(
+        default_factory=list,
+        alias="reasoningEfforts",
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 class ModelList(BaseModel):
@@ -74,12 +99,16 @@ class ChatMessage(BaseModel):
         name: Optional sender name
         tool_calls: List of tool calls (for assistant)
         tool_call_id: Tool call ID (for tool)
+        reasoning_content: Assistant reasoning text for conversation history
+        reasoning_signature: Optional upstream signature for reasoning history
     """
     role: str
     content: Optional[Union[str, List[Any], Any]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[Any]] = None
     tool_call_id: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    reasoning_signature: Optional[str] = None
     
     model_config = {"extra": "allow"}
 
@@ -164,9 +193,12 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     
-    # Reasoning (OpenAI reasoning models)
-    # Supports all official reasoning_effort levels from OpenAI API
-    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    # Reasoning (OpenAI reasoning models and Kiro-compatible extensions)
+    # Supports OpenAI levels plus Kiro's native "max" extension.
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
+    thinking: Optional[Dict[str, Any]] = None
+    output_config: Optional[Dict[str, Any]] = None
+    reasoning: Optional[Dict[str, Any]] = None
     
     # Tools (function calling)
     tools: Optional[List[Tool]] = None

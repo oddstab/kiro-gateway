@@ -3565,9 +3565,13 @@ class TestInjectThinkingTags:
                 result = inject_thinking_tags(content, ThinkingConfig())
         
         print(f"Result length: {len(result)} chars")
-        print("Checking that thinking_instruction tag is present...")
+        print("Checking that thinking_instruction tag and output contract are present...")
         assert "<thinking_instruction>" in result
         assert "</thinking_instruction>" in result
+        assert "Start your response with exactly <thinking>" in result
+        assert "close it with </thinking>" in result
+        assert result.index("<thinking_instruction>") < result.index("Start your response with exactly <thinking>")
+        assert result.index("close it with </thinking>") < result.index("</thinking_instruction>")
     
     def test_thinking_instruction_contains_english_directive(self):
         """
@@ -3783,6 +3787,22 @@ class TestBuildKiroHistory:
         assert len(result) == 1
         assert "assistantResponseMessage" in result[0]
         assert result[0]["assistantResponseMessage"]["content"] == "Hi there"
+
+    def test_omits_unsigned_assistant_reasoning(self):
+        """Unsigned reasoning must not be sent because Kiro rejects it."""
+        messages = [
+            UnifiedMessage(
+                role="assistant",
+                content="Answer",
+                reasoning_content="Reasoning without a signature",
+            )
+        ]
+
+        result = build_kiro_history(messages, "claude-sonnet-4")
+
+        assistant = result[0]["assistantResponseMessage"]
+        assert assistant["content"] == "Answer"
+        assert "reasoningContent" not in assistant
     
     def test_expects_normalized_roles_only(self):
         """
