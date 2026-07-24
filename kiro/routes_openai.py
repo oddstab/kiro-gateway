@@ -50,6 +50,7 @@ from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
 from kiro.converters_core import get_native_reasoning_format
 from kiro.converters_openai import build_kiro_payload
+from kiro.streaming_core import prefetch_stream
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
@@ -529,9 +530,6 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 )
                 
                 if response.status_code == 200:
-                    # SUCCESS - report and return
-                    await account_manager.report_success(account.id, request_data.model)
-                    
                     # Prepare data for token counting
                     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
                     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
@@ -563,31 +561,32 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 logger.debug("Client disconnected during streaming (GeneratorExit in routes)")
                             except Exception as e:
                                 streaming_error = e
-                                try:
-                                    yield "data: [DONE]\n\n"
-                                except Exception:
-                                    pass
                                 raise
                             finally:
                                 await http_client.close()
                                 if streaming_error:
+                                    status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
-                                    logger.error(f"HTTP 500 - POST /v1/chat/completions (streaming) - [{error_type}] {error_msg[:100]}")
+                                    logger.error(f"HTTP {status_code} - POST /v1/chat/completions (streaming) - [{error_type}] {error_msg[:100]}")
                                 elif client_disconnected:
                                     logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - client disconnected")
                                 else:
                                     logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - completed")
                                 if debug_logger:
                                     if streaming_error:
-                                        debug_logger.flush_on_error(500, str(streaming_error))
+                                        status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                                        debug_logger.flush_on_error(status_code, str(streaming_error))
                                     else:
                                         debug_logger.discard_buffers()
-                        
-                        return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+
+                        prefetched_stream = await prefetch_stream(stream_wrapper())
+                        await account_manager.report_success(account.id, request_data.model)
+                        return StreamingResponse(prefetched_stream, media_type="text/event-stream")
                     
                     else:
                         # Non-streaming mode
+                        await account_manager.report_success(account.id, request_data.model)
                         openai_response = await collect_stream_response(
                             http_client.client,
                             response,
@@ -866,20 +865,15 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     logger.debug("Client disconnected during streaming (GeneratorExit in routes)")
                 except Exception as e:
                     streaming_error = e
-                    # Try to send [DONE] to client before finishing
-                    # so client doesn't "hang" waiting for data
-                    try:
-                        yield "data: [DONE]\n\n"
-                    except Exception:
-                        pass  # Client already disconnected
                     raise
                 finally:
                     await http_client.close()
                     # Log access log for streaming (success or error)
                     if streaming_error:
+                        status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
                         error_type = type(streaming_error).__name__
                         error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
-                        logger.error(f"HTTP 500 - POST /v1/chat/completions (streaming) - [{error_type}] {error_msg[:100]}")
+                        logger.error(f"HTTP {status_code} - POST /v1/chat/completions (streaming) - [{error_type}] {error_msg[:100]}")
                     elif client_disconnected:
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - client disconnected")
                     else:
@@ -887,11 +881,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     # Write debug logs AFTER streaming completes
                     if debug_logger:
                         if streaming_error:
-                            debug_logger.flush_on_error(500, str(streaming_error))
+                            status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                            debug_logger.flush_on_error(status_code, str(streaming_error))
                         else:
                             debug_logger.discard_buffers()
-            
-            return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+
+            prefetched_stream = await prefetch_stream(stream_wrapper())
+            return StreamingResponse(prefetched_stream, media_type="text/event-stream")
         
         else:
             

@@ -473,6 +473,7 @@ async def stream_kiro_to_openai_internal(
         yield "data: [DONE]\n\n"
         
     except FirstTokenTimeoutError:
+        streaming_error_occurred = True
         # Propagate timeout up for retry
         raise
     except GeneratorExit:

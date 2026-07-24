@@ -120,6 +120,26 @@ class FirstTokenTimeoutError(Exception):
     pass
 
 
+async def prefetch_stream(
+    stream: AsyncGenerator[str, None],
+) -> AsyncGenerator[str, None]:
+    """Read the first chunk before HTTP response headers are committed."""
+    try:
+        first_chunk = await anext(stream)
+    except StopAsyncIteration as exc:
+        raise FirstTokenTimeoutError("Upstream stream ended before the first response chunk") from exc
+
+    async def replay() -> AsyncGenerator[str, None]:
+        try:
+            yield first_chunk
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return replay()
+
+
 # ==================================================================================================
 # Kiro Stream Parsing
 # ==================================================================================================
@@ -173,10 +193,9 @@ async def parse_kiro_stream(
         except asyncio.TimeoutError:
             logger.warning(f"[FirstTokenTimeout] Model did not respond within {first_token_timeout}s")
             raise FirstTokenTimeoutError(f"No response within {first_token_timeout} seconds")
-        except StopAsyncIteration:
-            # Empty response - this is normal, just finish
-            logger.debug("Empty response from Kiro API")
-            return
+        except StopAsyncIteration as exc:
+            logger.warning("[FirstTokenTimeout] Kiro API returned an empty response stream")
+            raise FirstTokenTimeoutError("Kiro API returned an empty response stream") from exc
         
         # Process first chunk
         if debug_logger:
@@ -518,9 +537,14 @@ async def stream_with_first_token_retry(
                     raise Exception(f"Upstream API error ({response.status_code}): {error_text}")
             
             # Try to stream with first token timeout
+            chunk_received = False
             async for chunk in stream_processor(response):
+                chunk_received = True
                 yield chunk
-            
+
+            if not chunk_received:
+                raise FirstTokenTimeoutError("Upstream stream ended before the first response chunk")
+
             # Successfully completed - exit
             return
             

@@ -45,6 +45,7 @@ from kiro.models_anthropic import (
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.converters_anthropic import anthropic_to_kiro
+from kiro.streaming_core import prefetch_stream
 from kiro.streaming_anthropic import (
     stream_kiro_to_anthropic,
     collect_anthropic_response,
@@ -440,9 +441,6 @@ async def messages(
                 )
                 
                 if response.status_code == 200:
-                    # SUCCESS - report and return
-                    await account_manager.report_success(account.id, request_data.model)
-                    
                     if request_data.stream:
                         # Streaming mode
                         async def stream_wrapper():
