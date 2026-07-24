@@ -40,6 +40,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     get_native_reasoning_format,
+    normalize_native_reasoning_effort,
     build_kiro_payload,
     extract_text_content,
     extract_images_from_content,
@@ -471,15 +472,24 @@ def extract_thinking_config_from_anthropic(
         native_thinking.pop("budget_tokens", None)
         native_thinking["type"] = "adaptive" if thinking_type in (None, "enabled") else thinking_type
         native_thinking.setdefault("display", "summarized")
+        native_output_config = dict(output_config or {})
+        if native_output_config.get("effort"):
+            native_output_config["effort"] = normalize_native_reasoning_effort(
+                native_output_config["effort"]
+            )
         native_fields: Dict[str, Any] = {"thinking": native_thinking}
-        if output_config:
-            native_fields["output_config"] = dict(output_config)
+        if native_output_config:
+            native_fields["output_config"] = native_output_config
         return ThinkingConfig(enabled=True, native_fields=native_fields)
 
     if native_format == "reasoning" and output_config and output_config.get("effort"):
         return ThinkingConfig(
             enabled=True,
-            native_fields={"reasoning": {"effort": output_config["effort"]}},
+            native_fields={
+                "reasoning": {
+                    "effort": normalize_native_reasoning_effort(output_config["effort"])
+                }
+            },
         )
 
     budget = thinking.get("budget_tokens") if thinking else None

@@ -2121,6 +2121,26 @@ class TestAnthropicNativeReasoningPayloads:
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
 
+    def test_maps_xhigh_output_config_to_kiro_max(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4.8",
+            messages=[AnthropicMessage(role="user", content="Solve this")],
+            max_tokens=4096,
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            output_config={"effort": "xhigh"},
+        )
+        model_info = {
+            "additionalModelRequestFieldsSchema": {
+                "properties": {"output_config": {"type": "object"}}
+            }
+        }
+
+        payload = anthropic_to_kiro(request, "conv-max", "", model_info)
+
+        assert payload["additionalModelRequestFields"]["output_config"] == {
+            "effort": "max"
+        }
+
     def test_round_trips_anthropic_thinking_history(self):
         request = AnthropicMessagesRequest(
             model="claude-sonnet-4.5",

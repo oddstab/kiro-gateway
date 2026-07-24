@@ -45,6 +45,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     get_native_reasoning_format,
+    normalize_native_reasoning_effort,
     build_kiro_payload as core_build_kiro_payload,
 )
 
@@ -370,7 +371,7 @@ def extract_thinking_config_from_openai(
 
     if native_format == "reasoning":
         native_reasoning = dict(reasoning or {})
-        effort = (
+        effort = normalize_native_reasoning_effort(
             native_reasoning.get("effort")
             or (output_config or {}).get("effort")
             or request.reasoning_effort
@@ -391,7 +392,7 @@ def extract_thinking_config_from_openai(
         native_thinking.setdefault("display", "summarized")
 
         native_output_config = dict(output_config or {})
-        effort = (
+        effort = normalize_native_reasoning_effort(
             native_output_config.get("effort")
             or (reasoning or {}).get("effort")
             or request.reasoning_effort

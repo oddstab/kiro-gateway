@@ -1923,6 +1923,35 @@ class TestNativeReasoningPayloads:
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
 
+    @pytest.mark.parametrize(
+        ("model", "model_info", "expected_fields"),
+        [
+            (
+                "gpt-5.6",
+                {"additionalModelRequestFieldsSchema": {"properties": {"reasoning": {}}}},
+                {"reasoning": {"effort": "max"}},
+            ),
+            (
+                "claude-opus-4.8",
+                {"additionalModelRequestFieldsSchema": {"properties": {"output_config": {}}}},
+                {
+                    "thinking": {"type": "adaptive", "display": "summarized"},
+                    "output_config": {"effort": "max"},
+                },
+            ),
+        ],
+    )
+    def test_maps_grok_xhigh_to_kiro_max(self, model, model_info, expected_fields):
+        request = ChatCompletionRequest(
+            model=model,
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort="xhigh",
+        )
+
+        payload = build_kiro_payload(request, "conv-max", "", model_info)
+
+        assert payload["additionalModelRequestFields"] == expected_fields
+
     def test_uses_claude_native_schema_for_reasoning_effort(self):
         request = ChatCompletionRequest(
             model="claude-sonnet-4.5",

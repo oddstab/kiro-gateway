@@ -184,6 +184,11 @@ def get_native_reasoning_format(
     return None
 
 
+def normalize_native_reasoning_effort(effort: Any) -> Any:
+    """Map OpenAI's highest reasoning effort alias to Kiro's native value."""
+    return "max" if effort == "xhigh" else effort
+
+
 # ==================================================================================================
 # Text Content Extraction
 # ==================================================================================================

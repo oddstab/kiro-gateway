@@ -169,8 +169,8 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = None
     
     # Reasoning (OpenAI reasoning models and Kiro-compatible extensions)
-    # Supports all official reasoning_effort levels from OpenAI API.
-    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    # Supports OpenAI levels plus Kiro's native "max" extension.
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
     reasoning: Optional[Dict[str, Any]] = None
