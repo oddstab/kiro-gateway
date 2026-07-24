@@ -380,6 +380,48 @@ class TestModelsEndpoint:
         for model in response.json()["data"]:
             assert model["owned_by"] == "anthropic"
 
+    def test_models_advertise_kiro_effort_labels_to_grok(self, test_client, valid_proxy_api_key):
+        """Native reasoning models should display Kiro effort names in Grok."""
+        response = test_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
+        )
+
+        assert response.status_code == 200
+        native_models = [
+            model
+            for model in response.json()["data"]
+            if model["supportsReasoningEffort"]
+        ]
+        assert native_models
+
+        for model in native_models:
+            options = model["reasoningEfforts"]
+            assert [option["id"] for option in options] == [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ]
+            assert [option["label"] for option in options] == [
+                "None",
+                "Low",
+                "Medium",
+                "High",
+                "xHigh",
+                "Max",
+            ]
+            assert [option["value"] for option in options] == [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ]
+
 
 # =============================================================================
 # Tests for chat completions endpoint (/v1/chat/completions)

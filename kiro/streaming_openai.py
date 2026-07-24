@@ -159,16 +159,25 @@ async def stream_kiro_to_openai_internal(
             elif event.type == "thinking" and event.thinking_content:
                 # Accumulate thinking content
                 full_thinking_content += event.thinking_content
-                
+
+                # Emit opening chunk before first reasoning delta so clients
+                # that expect a clean role+content initialization see it.
+                if first_chunk:
+                    opening_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
+                    }
+                    yield f"data: {json.dumps(opening_chunk, ensure_ascii=False)}\n\n"
+                    first_chunk = False
+
                 # Send as reasoning_content or content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
                     delta = {"reasoning_content": event.thinking_content}
                 else:
                     delta = {"content": event.thinking_content}
-                
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
                 
                 openai_chunk = {
                     "id": completion_id,
@@ -464,6 +473,7 @@ async def stream_kiro_to_openai_internal(
         yield "data: [DONE]\n\n"
         
     except FirstTokenTimeoutError:
+        streaming_error_occurred = True
         # Propagate timeout up for retry
         raise
     except GeneratorExit:

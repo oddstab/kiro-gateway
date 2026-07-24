@@ -353,24 +353,18 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 # First Token Timeout Settings (Streaming Retry)
 # ==================================================================================================
 
-# Timeout for waiting for the first token from the model (in seconds).
-# If the model doesn't respond within this time, the request will be cancelled and retried.
-# This helps handle "stuck" requests when the model takes too long to think.
-# Default: 30 seconds (recommended for production)
-# Set a lower value (e.g., 10-15) for more aggressive retry.
-FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "15"))
+# Timeout for waiting for the first response chunk from the model (in seconds).
+# Long-context requests with maximum reasoning can legitimately take several minutes to start.
+FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "300"))
 
 # Read timeout for streaming responses (in seconds).
 # This is the maximum time to wait for data between chunks during streaming.
-# Should be longer than FIRST_TOKEN_TIMEOUT since the model may pause between chunks
-# while "thinking" (especially for tool calls or complex reasoning).
-# Default: 300 seconds (5 minutes) - generous timeout to avoid premature disconnects.
-STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "300"))
+# Keep it longer than FIRST_TOKEN_TIMEOUT so the transport timeout cannot win the race.
+STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "600"))
 
-# Maximum number of attempts on first token timeout.
-# After exhausting all attempts, an error will be returned.
-# Default: 3 attempts
-FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
+# Maximum number of total attempts after a first-token timeout.
+# One long attempt avoids multiplying an expensive generation behind client retries.
+FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "1"))
 
 # ==================================================================================================
 # Debug Settings
@@ -411,16 +405,26 @@ def _warn_timeout_configuration():
     FIRST_TOKEN_TIMEOUT ({FIRST_TOKEN_TIMEOUT}s) >= STREAMING_READ_TIMEOUT ({STREAMING_READ_TIMEOUT}s)
     
     These timeouts serve different purposes:
-      - FIRST_TOKEN_TIMEOUT: time to wait for model to START responding (default: 15s)
-      - STREAMING_READ_TIMEOUT: time to wait BETWEEN chunks during streaming (default: 300s)
+      - FIRST_TOKEN_TIMEOUT: time to wait for model to START responding (default: 300s)
+      - STREAMING_READ_TIMEOUT: time to wait BETWEEN chunks during streaming (default: 600s)
     
     Recommendation: FIRST_TOKEN_TIMEOUT should be LESS than STREAMING_READ_TIMEOUT.
     
     Example configuration:
-      FIRST_TOKEN_TIMEOUT=15
-      STREAMING_READ_TIMEOUT=300{RESET}
+      FIRST_TOKEN_TIMEOUT=300
+      STREAMING_READ_TIMEOUT=600{RESET}
 """
         print(warning_text, file=sys.stderr)
+
+# ==================================================================================================
+# Reasoning Settings
+# ==================================================================================================
+
+# Prefer Kiro's native reasoning protocol when the client requests reasoning and
+# the selected model exposes a supported additionalModelRequestFields schema.
+# Disable this to force the existing prompt-based fallback.
+_NATIVE_REASONING_RAW: str = os.getenv("NATIVE_REASONING", "").lower()
+NATIVE_REASONING_ENABLED: bool = _NATIVE_REASONING_RAW not in ("false", "0", "no", "disabled", "off")
 
 # ==================================================================================================
 # Fake Reasoning Settings (Extended Thinking via Tag Injection)

@@ -45,6 +45,7 @@ from kiro.models_anthropic import (
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.converters_anthropic import anthropic_to_kiro
+from kiro.streaming_core import prefetch_stream
 from kiro.streaming_anthropic import (
     stream_kiro_to_anthropic,
     collect_anthropic_response,
@@ -379,11 +380,17 @@ async def messages(
             # profileArn is required by runtime.kiro.dev for all auth types
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
             
+            model_resolution = model_resolver.resolve(request_data.model)
+            model_info = (
+                model_cache.get(model_resolution.normalized)
+                or model_cache.get(model_resolution.internal_id)
+            )
             try:
                 kiro_payload = anthropic_to_kiro(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    model_info=model_info,
                 )
             except ValueError as e:
                 logger.error(f"Conversion error: {e}")
@@ -434,9 +441,6 @@ async def messages(
                 )
                 
                 if response.status_code == 200:
-                    # SUCCESS - report and return
-                    await account_manager.report_success(account.id, request_data.model)
-                    
                     if request_data.stream:
                         # Streaming mode
                         async def stream_wrapper():
@@ -687,11 +691,17 @@ async def messages(
     # profileArn is required by runtime.kiro.dev for all auth types
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
     
+    model_resolution = model_resolver.resolve(request_data.model)
+    model_info = (
+        model_cache.get(model_resolution.normalized)
+        or model_cache.get(model_resolution.internal_id)
+    )
     try:
         kiro_payload = anthropic_to_kiro(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            model_info=model_info,
         )
     except ValueError as e:
         logger.error(f"Conversion error: {e}")
