@@ -3565,9 +3565,13 @@ class TestInjectThinkingTags:
                 result = inject_thinking_tags(content, ThinkingConfig())
         
         print(f"Result length: {len(result)} chars")
-        print("Checking that thinking_instruction tag is present...")
+        print("Checking that thinking_instruction tag and output contract are present...")
         assert "<thinking_instruction>" in result
         assert "</thinking_instruction>" in result
+        assert "Start your response with exactly <thinking>" in result
+        assert "close it with </thinking>" in result
+        assert result.index("<thinking_instruction>") < result.index("Start your response with exactly <thinking>")
+        assert result.index("close it with </thinking>") < result.index("</thinking_instruction>")
     
     def test_thinking_instruction_contains_english_directive(self):
         """

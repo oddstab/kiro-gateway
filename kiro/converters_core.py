@@ -410,6 +410,8 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     
     # Thinking instruction to improve reasoning quality
     thinking_instruction = (
+        "Output format is mandatory. Start your response with exactly <thinking> and do not output any text before it. "
+        "Put your reasoning inside that block, close it with </thinking>, and only then provide the final answer.\n\n"
         "Think in English for better reasoning quality.\n\n"
         "Your thinking process should be thorough and systematic:\n"
         "- First, make sure you fully understand what is being asked\n"
