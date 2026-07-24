@@ -16,6 +16,8 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
+
 from kiro.streaming_anthropic import (
     generate_message_id,
     generate_thinking_signature,
@@ -224,30 +226,28 @@ class TestStreamKiroToAnthropic:
     @pytest.mark.asyncio
     async def test_yields_message_start_event(self, mock_response, mock_model_cache, mock_auth_manager):
         """
-        What it does: Yields message_start event at beginning.
-        Goal: Verify Anthropic streaming protocol.
+        What it does: Yields message_start first after receiving a real Kiro event.
+        Goal: Preserve Anthropic ordering without committing HTTP 200 prematurely.
         """
-        print("Setup: Mock empty stream...")
+        print("Setup: Mock stream with content...")
         
         async def mock_parse_kiro_stream(*args, **kwargs):
-            return
-            yield  # Make it a generator
+            yield KiroEvent(type="content", content="Hello")
         
         print("Action: Streaming to Anthropic format...")
         events = []
         
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
-            async for event in stream_kiro_to_anthropic(
-                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
-            ):
-                events.append(event)
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                async for event in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(event)
         
         print(f"Received {len(events)} events")
-        
-        # First event should be message_start
-        assert len(events) > 0
+        assert events
         assert "event: message_start" in events[0]
-        print("✓ message_start event yielded first")
+        print("✓ message_start event yielded first after upstream data")
     
     @pytest.mark.asyncio
     async def test_yields_content_block_start_on_first_content(self, mock_response, mock_model_cache, mock_auth_manager):
@@ -868,8 +868,8 @@ class TestStreamingAnthropicErrorHandling:
     @pytest.mark.asyncio
     async def test_propagates_first_token_timeout_error(self, mock_response, mock_model_cache, mock_auth_manager):
         """
-        What it does: Propagates FirstTokenTimeoutError.
-        Goal: Verify timeout error is not caught internally.
+        What it does: Propagates FirstTokenTimeoutError before emitting message_start.
+        Goal: Keep the HTTP response uncommitted so the route can return 504.
         """
         from kiro.streaming_core import FirstTokenTimeoutError
         
@@ -880,15 +880,17 @@ class TestStreamingAnthropicErrorHandling:
             yield  # Make it a generator
         
         print("Action: Streaming to Anthropic format with timeout...")
+        events = []
         
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with pytest.raises(FirstTokenTimeoutError):
                 async for event in stream_kiro_to_anthropic(
                     mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
                 ):
-                    pass
+                    events.append(event)
         
-        print("✓ FirstTokenTimeoutError propagated correctly")
+        assert events == []
+        print("✓ FirstTokenTimeoutError propagated before message_start")
     
     @pytest.mark.asyncio
     async def test_propagates_generator_exit(self, mock_response, mock_model_cache, mock_auth_manager):
@@ -915,10 +917,10 @@ class TestStreamingAnthropicErrorHandling:
         print("✓ GeneratorExit propagated correctly")
     
     @pytest.mark.asyncio
-    async def test_yields_error_event_on_exception(self, mock_response, mock_model_cache, mock_auth_manager):
+    async def test_propagates_exception_without_synthetic_error_event(self, mock_response, mock_model_cache, mock_auth_manager):
         """
-        What it does: Yields error event on exception.
-        Goal: Verify error event is sent to client.
+        What it does: Propagates formatter failures without synthesizing a clean stream ending.
+        Goal: Let the route decide whether to return HTTP error or an in-stream error event.
         """
         print("Setup: Mock stream that raises RuntimeError...")
         
@@ -931,21 +933,14 @@ class TestStreamingAnthropicErrorHandling:
         
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
-                try:
+                with pytest.raises(RuntimeError, match="Test error"):
                     async for event in stream_kiro_to_anthropic(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
                     ):
                         events.append(event)
-                except RuntimeError:
-                    pass
         
-        print(f"Received {len(events)} events")
-        
-        # Should have error event
-        error_events = [e for e in events if "event: error" in e]
-        assert len(error_events) >= 1
-        assert "Test error" in error_events[0]
-        print("✓ Error event yielded on exception")
+        assert not any("event: error" in event for event in events)
+        print("✓ Exception propagated without synthetic completion")
     
     @pytest.mark.asyncio
     async def test_closes_response_in_finally(self, mock_response, mock_model_cache, mock_auth_manager):
@@ -1371,10 +1366,10 @@ class TestStreamWithFirstTokenRetryAnthropic:
         print("✓ Retry on timeout works correctly")
     
     @pytest.mark.asyncio
-    async def test_raises_anthropic_error_after_all_retries(self, mock_model_cache, mock_auth_manager):
+    async def test_raises_http_504_after_all_retries(self, mock_model_cache, mock_auth_manager):
         """
-        What it does: Raises Anthropic-formatted error after all retries exhausted.
-        Goal: Verify error format matches Anthropic API.
+        What it does: Raises HTTP 504 after all first-token attempts are exhausted.
+        Goal: Allow the route to return an error before SSE headers are committed.
         """
         from kiro.streaming_core import FirstTokenTimeoutError
         
@@ -1393,8 +1388,8 @@ class TestStreamWithFirstTokenRetryAnthropic:
         print("Action: Streaming with all retries failing...")
         
         with patch('kiro.streaming_anthropic.stream_kiro_to_anthropic', mock_stream_kiro_to_anthropic):
-            with pytest.raises(Exception) as exc_info:
-                async for chunk in stream_with_first_token_retry_anthropic(
+            with pytest.raises(HTTPException) as exc_info:
+                async for _ in stream_with_first_token_retry_anthropic(
                     make_request=mock_make_request,
                     model="claude-sonnet-4",
                     model_cache=mock_model_cache,
@@ -1404,20 +1399,15 @@ class TestStreamWithFirstTokenRetryAnthropic:
                 ):
                     pass
         
-        print(f"Exception: {exc_info.value}")
-        
-        # Error should be in Anthropic format (JSON)
-        error_json = json.loads(str(exc_info.value))
-        assert error_json["type"] == "error"
-        assert error_json["error"]["type"] == "timeout_error"
-        assert "30" in error_json["error"]["message"]
-        print("✓ Anthropic-formatted error raised after all retries")
+        assert exc_info.value.status_code == 504
+        assert "30" in str(exc_info.value.detail)
+        print("✓ HTTP 504 raised after all retries")
     
     @pytest.mark.asyncio
-    async def test_raises_anthropic_error_on_http_error(self, mock_model_cache, mock_auth_manager):
+    async def test_raises_http_error_before_stream_starts(self, mock_model_cache, mock_auth_manager):
         """
-        What it does: Raises Anthropic-formatted error on HTTP error.
-        Goal: Verify HTTP errors are formatted correctly.
+        What it does: Preserves the upstream HTTP status before streaming starts.
+        Goal: Let FastAPI serialize the error instead of returning HTTP 200 SSE.
         """
         print("Setup: Mock request that returns HTTP error...")
         
@@ -1430,8 +1420,8 @@ class TestStreamWithFirstTokenRetryAnthropic:
         
         print("Action: Streaming with HTTP error...")
         
-        with pytest.raises(Exception) as exc_info:
-            async for chunk in stream_with_first_token_retry_anthropic(
+        with pytest.raises(HTTPException) as exc_info:
+            async for _ in stream_with_first_token_retry_anthropic(
                 make_request=mock_make_request,
                 model="claude-sonnet-4",
                 model_cache=mock_model_cache,
@@ -1441,14 +1431,9 @@ class TestStreamWithFirstTokenRetryAnthropic:
             ):
                 pass
         
-        print(f"Exception: {exc_info.value}")
-        
-        # Error should be in Anthropic format (JSON)
-        error_json = json.loads(str(exc_info.value))
-        assert error_json["type"] == "error"
-        assert error_json["error"]["type"] == "api_error"
-        assert "Upstream API error" in error_json["error"]["message"]
-        print("✓ Anthropic-formatted error raised on HTTP error")
+        assert exc_info.value.status_code == 500
+        assert "Upstream API error" in str(exc_info.value.detail)
+        print("✓ Upstream HTTP error preserved")
     
     @pytest.mark.asyncio
     async def test_passes_request_messages_to_stream(self, mock_model_cache, mock_auth_manager):

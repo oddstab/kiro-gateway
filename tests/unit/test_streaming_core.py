@@ -25,6 +25,7 @@ from kiro.streaming_core import (
     parse_kiro_stream,
     collect_stream_to_result,
     calculate_tokens_from_context_usage,
+    prefetch_stream,
     stream_with_first_token_retry,
     _process_chunk,
 )
@@ -468,10 +469,10 @@ class TestParseKiroStream:
         print("✓ FirstTokenTimeoutError raised on timeout")
     
     @pytest.mark.asyncio
-    async def test_handles_empty_response(self, mock_response):
+    async def test_rejects_empty_response(self, mock_response):
         """
-        What it does: Handles empty response gracefully.
-        Goal: Verify no events yielded for empty response.
+        What it does: Treats an empty upstream body as a retryable first-token failure.
+        Goal: Prevent a clean empty completion from reaching the client.
         """
         print("Setup: Mock empty response...")
         
@@ -481,20 +482,17 @@ class TestParseKiroStream:
         
         mock_response.aiter_bytes = mock_aiter_bytes
         
-        # Mock wait_for to raise StopAsyncIteration (empty response)
         async def mock_wait_for_empty(*args, **kwargs):
             raise StopAsyncIteration()
         
         print("Action: Parsing empty stream...")
-        events = []
         
         with patch('kiro.streaming_core.asyncio.wait_for', side_effect=mock_wait_for_empty):
-            async for event in parse_kiro_stream(mock_response, first_token_timeout=30):
-                events.append(event)
+            with pytest.raises(FirstTokenTimeoutError, match="empty response stream"):
+                async for _ in parse_kiro_stream(mock_response, first_token_timeout=30):
+                    pass
         
-        print(f"Received {len(events)} events")
-        assert len(events) == 0
-        print("✓ Empty response handled correctly")
+        print("✓ Empty response rejected for retry")
     
     @pytest.mark.asyncio
     async def test_handles_generator_exit(self, mock_response, mock_parser):
@@ -1870,3 +1868,34 @@ class TestNativeReasoningStreaming:
         ]
         assert parser.native_reasoning_seen is True
         fake_parser.feed.assert_not_called()
+
+
+class TestPrefetchStream:
+    """Tests for delaying HTTP response creation until a stream produces data."""
+
+    @pytest.mark.asyncio
+    async def test_replays_prefetched_chunk_and_remaining_stream(self):
+        async def source():
+            yield "first"
+            yield "second"
+
+        replay = await prefetch_stream(source())
+        assert [chunk async for chunk in replay] == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_propagates_error_before_first_chunk(self):
+        async def source():
+            raise RuntimeError("upstream failed")
+            yield
+
+        with pytest.raises(RuntimeError, match="upstream failed"):
+            await prefetch_stream(source())
+
+    @pytest.mark.asyncio
+    async def test_rejects_stream_without_chunks(self):
+        async def source():
+            return
+            yield
+
+        with pytest.raises(FirstTokenTimeoutError, match="before the first response chunk"):
+            await prefetch_stream(source())

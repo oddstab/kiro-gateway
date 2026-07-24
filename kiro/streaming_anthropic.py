@@ -46,6 +46,7 @@ from kiro.streaming_core import (
     FirstTokenTimeoutError,
     KiroEvent,
     calculate_tokens_from_context_usage,
+    prefetch_stream,
     stream_with_first_token_retry,
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
@@ -203,6 +204,10 @@ async def stream_kiro_to_anthropic(
     truncated_tools: List[Dict[str, Any]] = []
     
     try:
+        # Wait for a real Kiro event before emitting the synthetic Anthropic message_start.
+        # This keeps first-token failures retryable before HTTP 200 is committed.
+        kiro_events = await prefetch_stream(parse_kiro_stream(response, first_token_timeout))
+
         # Send message_start event
         yield format_sse_event("message_start", {
             "type": "message_start",
@@ -221,7 +226,7 @@ async def stream_kiro_to_anthropic(
             }
         })
         
-        async for event in parse_kiro_stream(response, first_token_timeout):
+        async for event in kiro_events:
             if event.type == "content":
                 content = event.content or ""
                 full_content += content

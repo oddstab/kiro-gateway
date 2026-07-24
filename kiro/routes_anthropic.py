@@ -446,6 +446,7 @@ async def messages(
                         async def stream_wrapper():
                             streaming_error = None
                             client_disconnected = False
+                            stream_started = False
                             try:
                                 async def make_retry_request():
                                     return await http_client.request_with_retry(
@@ -462,36 +463,39 @@ async def messages(
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
                                 ):
+                                    stream_started = True
                                     yield chunk
                             except GeneratorExit:
                                 client_disconnected = True
                                 logger.debug("Client disconnected during streaming (GeneratorExit in routes)")
                             except Exception as e:
                                 streaming_error = e
-                                try:
-                                    error_event = f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "api_error", "message": str(e)}})}\n\n'
-                                    yield error_event
-                                except Exception:
-                                    pass
+                                if not stream_started:
+                                    raise
+                                yield f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "api_error", "message": str(e)}})}\n\n'
                             finally:
                                 await http_client.close()
                                 if streaming_error:
+                                    status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
-                                    logger.error(f"HTTP 500 - POST /v1/messages (streaming) - [{error_type}] {error_msg[:100]}")
+                                    logger.error(f"HTTP {status_code} - POST /v1/messages (streaming) - [{error_type}] {error_msg[:100]}")
                                 elif client_disconnected:
-                                    logger.info(f"HTTP 200 - POST /v1/messages (streaming) - client disconnected")
+                                    logger.info("HTTP 200 - POST /v1/messages (streaming) - client disconnected")
                                 else:
-                                    logger.info(f"HTTP 200 - POST /v1/messages (streaming) - completed")
+                                    logger.info("HTTP 200 - POST /v1/messages (streaming) - completed")
                                 
                                 if debug_logger:
                                     if streaming_error:
-                                        debug_logger.flush_on_error(500, str(streaming_error))
+                                        status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                                        debug_logger.flush_on_error(status_code, str(streaming_error))
                                     else:
                                         debug_logger.discard_buffers()
-                        
+
+                        prefetched_stream = await prefetch_stream(stream_wrapper())
+                        await account_manager.report_success(account.id, request_data.model)
                         return StreamingResponse(
-                            stream_wrapper(),
+                            prefetched_stream,
                             media_type="text/event-stream",
                             headers={
                                 "Cache-Control": "no-cache",
@@ -512,6 +516,7 @@ async def messages(
                         )
                         
                         await http_client.close()
+                        await account_manager.report_success(account.id, request_data.model)
                         logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
                         
                         if debug_logger:
@@ -808,6 +813,7 @@ async def messages(
             async def stream_wrapper():
                 streaming_error = None
                 client_disconnected = False
+                stream_started = False
                 try:
                     # Create retry request function for retries
                     async def make_retry_request():
@@ -826,37 +832,38 @@ async def messages(
                         request_tools=tools_for_tokenizer,
                         request_system=system_for_tokenizer,
                     ):
+                        stream_started = True
                         yield chunk
                 except GeneratorExit:
                     client_disconnected = True
                     logger.debug("Client disconnected during streaming (GeneratorExit in routes)")
                 except Exception as e:
                     streaming_error = e
-                    # Send error event to client, then gracefully end the stream
-                    try:
-                        error_event = f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "api_error", "message": str(e)}})}\n\n'
-                        yield error_event
-                    except Exception:
-                        pass
+                    if not stream_started:
+                        raise
+                    yield f'event: error\ndata: {json.dumps({"type": "error", "error": {"type": "api_error", "message": str(e)}})}\n\n'
                 finally:
                     await http_client.close()
                     if streaming_error:
+                        status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
                         error_type = type(streaming_error).__name__
                         error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
-                        logger.error(f"HTTP 500 - POST /v1/messages (streaming) - [{error_type}] {error_msg[:100]}")
+                        logger.error(f"HTTP {status_code} - POST /v1/messages (streaming) - [{error_type}] {error_msg[:100]}")
                     elif client_disconnected:
-                        logger.info(f"HTTP 200 - POST /v1/messages (streaming) - client disconnected")
+                        logger.info("HTTP 200 - POST /v1/messages (streaming) - client disconnected")
                     else:
-                        logger.info(f"HTTP 200 - POST /v1/messages (streaming) - completed")
+                        logger.info("HTTP 200 - POST /v1/messages (streaming) - completed")
                     
                     if debug_logger:
                         if streaming_error:
-                            debug_logger.flush_on_error(500, str(streaming_error))
+                            status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                            debug_logger.flush_on_error(status_code, str(streaming_error))
                         else:
                             debug_logger.discard_buffers()
-            
+
+            prefetched_stream = await prefetch_stream(stream_wrapper())
             return StreamingResponse(
-                stream_wrapper(),
+                prefetched_stream,
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",

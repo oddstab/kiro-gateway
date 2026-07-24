@@ -121,8 +121,8 @@ class FirstTokenTimeoutError(Exception):
 
 
 async def prefetch_stream(
-    stream: AsyncGenerator[str, None],
-) -> AsyncGenerator[str, None]:
+    stream: AsyncGenerator[Any, None],
+) -> AsyncGenerator[Any, None]:
     """Read the first chunk before HTTP response headers are committed."""
     try:
         first_chunk = await anext(stream)
