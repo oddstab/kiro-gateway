@@ -41,12 +41,14 @@ from kiro.config import (
 )
 from kiro.models_openai import (
     OpenAIModel,
+    ReasoningEffortOption,
     ModelList,
     ChatCompletionRequest,
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
+from kiro.converters_core import get_native_reasoning_format
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
@@ -58,6 +60,36 @@ from kiro.grok_web_search import (
     extract_query_from_responses_input,
     build_responses_payload,
 )
+
+
+# Grok displays option labels/ids, but sends the canonical OpenAI value.
+# The gateway maps xhigh to Kiro's native max value at request conversion time.
+KIRO_REASONING_EFFORT_OPTIONS = [
+    ReasoningEffortOption(
+        id="max",
+        value="xhigh",
+        label="max",
+        description="Maximum Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="high",
+        value="high",
+        label="high",
+        description="High Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="medium",
+        value="medium",
+        label="medium",
+        description="Medium Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="low",
+        value="low",
+        label="low",
+        description="Low Kiro reasoning",
+    ),
+]
 
 # Import debug_logger
 try:
@@ -149,15 +181,23 @@ async def get_models(request: Request):
         account = request.app.state.account_manager.get_first_account()
         available_model_ids = account.model_resolver.get_available_models()
     
-    # Build OpenAI-compatible model list
-    openai_models = [
-        OpenAIModel(
-            id=model_id,
-            owned_by="anthropic",
-            description="Claude model via Kiro API"
+    # Build OpenAI-compatible model list with Grok's optional effort metadata.
+    openai_models = []
+    for model_id in available_model_ids:
+        supports_native_reasoning = get_native_reasoning_format(model_id) is not None
+        openai_models.append(
+            OpenAIModel(
+                id=model_id,
+                owned_by="anthropic",
+                description="Model via Kiro API",
+                supports_reasoning_effort=supports_native_reasoning,
+                reasoning_efforts=(
+                    KIRO_REASONING_EFFORT_OPTIONS
+                    if supports_native_reasoning
+                    else []
+                ),
+            )
         )
-        for model_id in available_model_ids
-    ]
     
     return ModelList(data=openai_models)
 

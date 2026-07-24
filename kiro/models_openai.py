@@ -34,17 +34,42 @@ from pydantic import BaseModel, Field
 # Models for /v1/models endpoint
 # ==================================================================================================
 
+class ReasoningEffortOption(BaseModel):
+    """Provider-specific reasoning effort option advertised to Grok Build."""
+
+    id: str
+    value: str
+    label: str
+    description: Optional[str] = None
+    default: bool = False
+
+
 class OpenAIModel(BaseModel):
     """
     Data model for describing an AI model in OpenAI format.
     
-    Used in the /v1/models endpoint response.
+    Used in the /v1/models endpoint response. Grok-specific reasoning fields
+    are optional extensions ignored by standard OpenAI clients.
     """
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "anthropic"
     description: Optional[str] = None
+    supports_reasoning_effort: bool = Field(
+        default=False,
+        alias="supportsReasoningEffort",
+    )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        alias="reasoningEffort",
+    )
+    reasoning_efforts: List[ReasoningEffortOption] = Field(
+        default_factory=list,
+        alias="reasoningEfforts",
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 class ModelList(BaseModel):
