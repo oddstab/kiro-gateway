@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -117,7 +117,7 @@ def enhance_kiro_error(error_json: Dict[str, Any]) -> KiroErrorInfo:
         # Generic 400 error
         user_message = (
             "Kiro API rejected the request. If problem persists, open issue with info and attached debug logs at:"
-            "https://github.com/jwadow/kiro-gateway/issues"
+            "https://github.com/oddstab/kiro-gateway/issues"
         )
 
     # Future error enhancements can be added here:

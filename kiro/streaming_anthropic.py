@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -50,6 +50,7 @@ from kiro.streaming_core import (
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.mcp_tools import client_provides_web_search
 from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
 
 if TYPE_CHECKING:
@@ -442,8 +443,15 @@ async def stream_kiro_to_anthropic(
                 # WebSearch Support - Path B: MCP Tool Emulation (Streaming Interception)
                 # ==============================================================================
                 
-                # INTERCEPT web_search tool calls (Path B - MCP emulation)
-                if tool_name == "web_search":
+                # INTERCEPT web_search tool calls (Path B - MCP emulation).
+                #
+                # Skipped when the CLIENT sent its own web_search tool: it runs
+                # the search itself, so intercepting would swallow the call and
+                # answer with `<web_search>` tagged text that the client renders
+                # verbatim. Mirrors the OpenAI path in kiro/streaming_openai.py.
+                if tool_name == "web_search" and not client_provides_web_search(
+                    request_tools
+                ):
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
                     
                     logger.info("Intercepted web_search tool call (Path B - MCP emulation)")

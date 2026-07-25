@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -221,6 +221,62 @@ async def call_kiro_mcp_api(
     except Exception as e:
         logger.error(f"MCP API unexpected exception: {e}", exc_info=True)
         return None, None
+
+
+def client_provides_web_search(tools: Optional[Any]) -> bool:
+    """
+    Detect whether the client already ships its own web_search tool.
+
+    When it does, the gateway must neither auto-inject a duplicate web_search
+    tool nor intercept the resulting call (Path B). Otherwise the model calls
+    the gateway's copy, Path B answers it with `<web_search>` tagged text, and
+    those raw tags end up rendered in the user's chat window.
+
+    Grok Build is the motivating case: `web_search` is one of its standard
+    client-side tools (grok-build: xai-grok-tools/src/registry/types.rs) and it
+    executes searches itself against POST /v1/responses, handled by
+    kiro/grok_web_search.py.
+
+    Accepts both Pydantic tool models and plain dicts, in OpenAI shape
+    ({"type": "function", "function": {"name": ...}}), Anthropic shape
+    ({"name": ...}) and the native server-side shape ({"type": "web_search"}).
+
+    Args:
+        tools: Tool list from the incoming request, or None
+
+    Returns:
+        True if any tool is a web_search tool supplied by the client
+    """
+    if not tools:
+        return False
+
+    for tool in tools:
+        # Native server-side tool: {"type": "web_search"} / "web_search_20250305"
+        tool_type = getattr(tool, "type", None)
+        if tool_type is None and isinstance(tool, dict):
+            tool_type = tool.get("type")
+        if isinstance(tool_type, str) and tool_type.startswith("web_search"):
+            return True
+
+        # OpenAI function shape: {"function": {"name": "web_search"}}
+        function = getattr(tool, "function", None)
+        if function is None and isinstance(tool, dict):
+            function = tool.get("function")
+        if function is not None:
+            name = getattr(function, "name", None)
+            if name is None and isinstance(function, dict):
+                name = function.get("name")
+            if name == "web_search":
+                return True
+
+        # Anthropic / flat shape: {"name": "web_search"}
+        name = getattr(tool, "name", None)
+        if name is None and isinstance(tool, dict):
+            name = tool.get("name")
+        if name == "web_search":
+            return True
+
+    return False
 
 
 def generate_search_summary(query: str, results: Dict) -> str:

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -56,6 +56,17 @@ class OpenAIModel(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "anthropic"
     description: Optional[str] = None
+    # Grok build 的 parse_remote_model_value 會優先讀 camelCase 的 contextWindow，
+    # 藉此讓每個模型套用真實 context window（= Kiro tokenLimits.maxInputTokens），
+    # 而非 Grok 內建的 DEFAULT_CONTEXT_WINDOW（256k）。省略時不輸出該欄位。
+    context_window: Optional[int] = Field(
+        default=None,
+        alias="contextWindow",
+    )
+    max_completion_tokens: Optional[int] = Field(
+        default=None,
+        alias="maxCompletionTokens",
+    )
     supports_reasoning_effort: bool = Field(
         default=False,
         alias="supportsReasoningEffort",

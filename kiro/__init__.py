@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -41,7 +41,7 @@ Modules:
 # This allows changing the version in only one place
 from kiro.config import APP_VERSION as __version__
 
-__author__ = "Jwadow"
+__author__ = "oddstab"
 
 # Main components for convenient import
 from kiro.auth import KiroAuthManager

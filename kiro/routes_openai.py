@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -55,7 +55,11 @@ from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
+from kiro.mcp_tools import (
+    handle_native_web_search,
+    call_kiro_mcp_api,
+    client_provides_web_search,
+)
 from kiro.grok_web_search import (
     is_grok_web_search_request,
     extract_query_from_responses_input,
@@ -194,15 +198,22 @@ async def get_models(request: Request):
         account = request.app.state.account_manager.get_first_account()
         available_model_ids = account.model_resolver.get_available_models()
     
+    # 帳號系統下可查各模型真實 context window（= Kiro tokenLimits.maxInputTokens），
+    # 傳給 Grok 的 contextWindow 欄位，讓其依實際上限觸發 auto-compaction。
+    account_manager = request.app.state.account_manager
+    get_context = getattr(account_manager, "get_model_context_window", None)
+
     # Build OpenAI-compatible model list with Grok's optional effort metadata.
     openai_models = []
     for model_id in available_model_ids:
         supports_native_reasoning = get_native_reasoning_format(model_id) is not None
+        context_window = get_context(model_id) if get_context else None
         openai_models.append(
             OpenAIModel(
                 id=model_id,
                 owned_by="anthropic",
                 description="Model via Kiro API",
+                context_window=context_window,
                 supports_reasoning_effort=supports_native_reasoning,
                 reasoning_efforts=(
                     KIRO_REASONING_EFFORT_OPTIONS
@@ -398,8 +409,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
     
-    # Auto-inject web_search tool if enabled (Path B - MCP emulation)
-    if WEB_SEARCH_ENABLED:
+    # Auto-inject web_search tool if enabled (Path B - MCP emulation).
+    #
+    # Skipped when the client already ships its own web search capability.
+    # Grok Build is the motivating case: it runs web_search client-side against
+    # POST /v1/responses (kiro/grok_web_search.py). Injecting a second,
+    # same-named tool made the model call OUR tool, which Path B then
+    # intercepted and answered with `<web_search>` tagged text -- the raw tags
+    # users saw in chat. Let the client's own tool win instead.
+    client_has_web_search = client_provides_web_search(request_data.tools)
+    if client_has_web_search:
+        logger.debug(
+            "Client provides its own web_search tool - skipping auto-injection "
+            "and Path B interception"
+        )
+
+    if WEB_SEARCH_ENABLED and not client_has_web_search:
         if request_data.tools is None:
             request_data.tools = []
         

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -29,10 +29,20 @@ async-openai parser accepts.
 Unlike the Path A / Path B handlers in mcp_tools.py (which emit results as
 <web_search> tagged text inside chat/messages responses), this returns a
 native-looking Responses object: URLs are embedded directly in output_text and
-annotations are kept empty ([]) to exactly match the shape the parser accepts
-(a populated url_citation annotation with a mismatched schema, or an extra
-usage object with the wrong nested fields, makes the whole Response parse fail
--- HTTP 200 but the tool reports "failed").
+each result also gets a `url_citation` annotation, matching the schema
+WebSearchClient::extract_citations reads (grok-build:
+crates/codegen/xai-grok-tools/src/implementations/web_search/client.rs).
+
+Shape matters: the client deserializes the whole body into async-openai's
+`rs::Response`, so an unknown field layout (a mis-shaped annotation, or a usage
+object with the wrong nested fields) makes the entire parse fail -- HTTP 200 but
+the tool reports "failed". Keep additions aligned with that struct.
+
+IMPORTANT -- how Grok Build reaches this endpoint: its web_search tool resolves
+`models.web_search` against the model list from /v1/models. If that id is
+missing, `resolve_web_search_sampling_config()` falls back to xAI's own
+inference endpoint and this gateway is never called. `GROK_WEB_SEARCH_MODEL` in
+kiro/config.py exists to keep the id advertised.
 """
 
 import time
@@ -126,6 +136,8 @@ def build_responses_payload(model: str, query: str, results: Optional[dict]) -> 
         A dict in OpenAI Responses API format that Grok Build accepts.
     """
     text_parts: list[str] = []
+    annotations: list[dict[str, Any]] = []
+    cursor = 0
 
     result_items = (results or {}).get("results", []) if results else []
     for i, r in enumerate(result_items, 1):
@@ -146,6 +158,23 @@ def build_responses_payload(model: str, query: str, results: Optional[dict]) -> 
         if snippet:
             entry += f"{snippet}\n"
         text_parts.append(entry)
+
+        # One url_citation per result, with offsets into the final text so
+        # Grok Build can render a citation list. Schema mirrors the fixtures in
+        # grok-build's own tests (web_search/client.rs::test_extract_citations_*):
+        # {"type": "url_citation", "url", "title", "start_index", "end_index"}.
+        # Offsets account for the "\n" that join() inserts between entries.
+        if url:
+            annotations.append(
+                {
+                    "type": "url_citation",
+                    "url": url,
+                    "title": title,
+                    "start_index": cursor,
+                    "end_index": cursor + len(entry),
+                }
+            )
+        cursor += len(entry) + 1  # +1 for the joining newline
 
     full_text = "\n".join(text_parts) if text_parts else "No search results found."
 
@@ -168,8 +197,7 @@ def build_responses_payload(model: str, query: str, results: Optional[dict]) -> 
                     {
                         "type": "output_text",
                         "text": full_text,
-                        # Kept empty on purpose -- see module docstring.
-                        "annotations": [],
+                        "annotations": annotations,
                     }
                 ],
             }

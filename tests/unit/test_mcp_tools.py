@@ -20,12 +20,123 @@ from datetime import datetime
 from kiro.mcp_tools import (
     generate_random_id,
     call_kiro_mcp_api,
+    client_provides_web_search,
     generate_search_summary,
     extract_query_from_messages,
     handle_native_web_search,
     generate_anthropic_web_search_sse,
     generate_openai_web_search_sse
 )
+
+
+# ==================================================================================================
+# Tests for client_provides_web_search
+#
+# Gate that keeps the gateway from injecting/intercepting a duplicate web_search
+# when the client (e.g. Grok Build) already runs searches itself. A false
+# negative here brings back the raw <web_search> tags in the user's chat.
+# ==================================================================================================
+
+class TestClientProvidesWebSearch:
+    """Detection of a client-supplied web_search tool, across tool shapes."""
+
+    @pytest.mark.parametrize("tools", [None, [], [{}]])
+    def test_no_tools_means_no_client_web_search(self, tools):
+        """
+        What it does: Verifies empty/missing tool lists return False.
+        Purpose: Clients without tools must keep the legacy Path B behaviour.
+        """
+        assert client_provides_web_search(tools) is False
+
+    def test_detects_openai_function_shape(self):
+        """
+        What it does: Detects {"type": "function", "function": {"name": ...}}.
+        Purpose: This is exactly what Grok Build sends (web_search is one of its
+                 standard client-side tools).
+        """
+        tools = [
+            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "web_search"}},
+        ]
+        assert client_provides_web_search(tools) is True
+
+    def test_detects_anthropic_flat_shape(self):
+        """
+        What it does: Detects {"name": "web_search"} with no type field.
+        Purpose: Anthropic tools are named at the top level.
+        """
+        assert client_provides_web_search([{"name": "web_search"}]) is True
+
+    @pytest.mark.parametrize(
+        "tool_type", ["web_search", "web_search_preview", "web_search_20250305"]
+    )
+    def test_detects_native_server_side_shape(self, tool_type):
+        """
+        What it does: Detects native/versioned {"type": "web_search*"} tools.
+        Purpose: Anthropic server-side search (Path A) is client-owned too.
+        """
+        assert client_provides_web_search([{"type": tool_type}]) is True
+
+    def test_detects_pydantic_models(self):
+        """
+        What it does: Feeds real Pydantic tool models, not dicts.
+        Purpose: Routes pass validated models, so attribute access must work.
+        """
+        from kiro.models_openai import Tool, ToolFunction
+
+        tools = [
+            Tool(type="function", function=ToolFunction(name="read_file", parameters={})),
+            Tool(type="function", function=ToolFunction(name="web_search", parameters={})),
+        ]
+        assert client_provides_web_search(tools) is True
+
+    def test_pydantic_models_without_web_search(self):
+        """
+        What it does: Verifies unrelated Pydantic tools return False.
+        Purpose: Avoid disabling Path B for clients that need it.
+        """
+        from kiro.models_openai import Tool, ToolFunction
+
+        tools = [
+            Tool(type="function", function=ToolFunction(name="read_file", parameters={}))
+        ]
+        assert client_provides_web_search(tools) is False
+
+    @pytest.mark.parametrize(
+        "tools",
+        [
+            [{"type": "function", "function": {"name": "web_fetch"}}],
+            [{"name": "websearch"}],
+            [{"name": "web_search_extra"}],
+            [{"type": "code_interpreter"}],
+        ],
+    )
+    def test_similar_but_different_names_do_not_match(self, tools):
+        """
+        What it does: Verifies near-miss names are not treated as web_search.
+        Purpose: Only an exact tool name (or a web_search* TYPE) may disable
+                 Path B; over-matching would silently break other clients.
+        """
+        assert client_provides_web_search(tools) is False
+
+    @pytest.mark.parametrize(
+        "tools",
+        [
+            ["not-a-dict"],
+            [None],
+            [{"function": None}],
+            [{"function": "not-a-dict"}],
+            [{"type": None, "name": None}],
+            [{"type": 123}],
+        ],
+    )
+    def test_malformed_entries_do_not_raise(self, tools):
+        """
+        What it does: Feeds malformed tool entries.
+        Purpose: This runs on every request; it must never raise, since an
+                 exception here would fail an otherwise valid chat completion.
+        """
+        assert client_provides_web_search(tools) is False
 
 
 # ==================================================================================================
