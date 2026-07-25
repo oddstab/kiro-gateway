@@ -23,7 +23,7 @@ grok-build's source:
                => request goes to xAI upstream, gateway never sees it
 
 Tests cover:
-- The web_search model id is advertised by /v1/models (branch 1 above)
+- The client-side search proxy is not advertised as a Kiro chat model
 - Request detection and query extraction for the real Grok Build request body
 - Responses payload shape, including url_citation annotations and offsets
 - No `<web_search>` tag leakage on this path
@@ -31,7 +31,6 @@ Tests cover:
 
 import pytest
 
-from kiro.config import GROK_WEB_SEARCH_MODEL, MODEL_ALIASES
 from kiro.grok_web_search import (
     build_responses_payload,
     extract_query_from_responses_input,
@@ -39,9 +38,11 @@ from kiro.grok_web_search import (
 )
 
 
+SEARCH_PROXY_MODEL = "kiro-search-proxy"
+
 # The exact request Grok Build sends (client.rs::search, lines 112-136).
 GROK_BUILD_REQUEST = {
-    "model": GROK_WEB_SEARCH_MODEL,
+    "model": SEARCH_PROXY_MODEL,
     "input": "kiro gateway web search",
     "tools": [{"type": "web_search", "filters": {"allowed_domains": None}}],
     "store": False,
@@ -103,113 +104,36 @@ def _extract_citations(payload: dict) -> list:
     return [u for u in urls if not (u in seen or seen.add(u))]
 
 
-class TestWebSearchModelIsAdvertised:
-    """Branch 1 of resolve_web_search_sampling_config must win.
+class TestSearchProxyIsClientOnly:
+    """The search proxy must never masquerade as a Kiro chat model."""
 
-    If the web_search model id is absent from /v1/models, Grok Build resolves
-    it to xAI's own inference endpoint and this gateway is bypassed entirely.
-    """
-
-    def test_web_search_model_is_registered_as_alias(self):
+    def test_shipped_aliases_contain_no_grok_models_or_search_proxy(self):
         """
-        What it does: Re-imports kiro.config fresh and checks the live dict.
-        Purpose: Alias keys are what /v1/models advertises, so this is the hook
-                 that keeps find_model_by_id() succeeding in Grok Build. Reading
-                 the module attribute (not a test-local import) means removing
-                 the registration in config.py actually fails this test.
+        What it does: Inspects the aliases shipped by the gateway.
+        Purpose: Removed Grok-to-Opus mappings must not reappear in /v1/models.
         """
-        import importlib
+        from kiro.config import MODEL_ALIASES
 
-        import kiro.config as config_module
-
-        importlib.reload(config_module)
-        assert config_module.GROK_WEB_SEARCH_MODEL in config_module.MODEL_ALIASES
-
-    def test_web_search_model_maps_to_a_real_kiro_model(self):
-        """
-        What it does: Verifies the alias target is a non-empty concrete model.
-        Purpose: A dangling alias would make chat requests for the id fail.
-        """
-        import importlib
-
-        import kiro.config as config_module
-
-        importlib.reload(config_module)
-        target = config_module.MODEL_ALIASES[config_module.GROK_WEB_SEARCH_MODEL]
-        assert isinstance(target, str) and target.strip()
-        assert target != config_module.GROK_WEB_SEARCH_MODEL, (
-            "alias must not point at itself"
-        )
-
-    def test_default_web_search_model_matches_grok_build_default(self):
-        """
-        What it does: Pins the default id to grok-build's compiled-in default.
-        Purpose: grok-build's default_web_search_model()
-                 (xai-grok-workspace/src/session/tool_config.rs) returns
-                 "grok-4.20-multi-agent" unless GROK_WEB_SEARCH_MODEL overrides
-                 it. A drift here silently sends searches to xAI instead.
-        """
-        import importlib
-        import os
-        from unittest.mock import patch
-
-        import kiro.config as config_module
-
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("GROK_WEB_SEARCH_MODEL", None)
-            importlib.reload(config_module)
-            assert config_module.GROK_WEB_SEARCH_MODEL == "grok-4.20-multi-agent"
-
-    def test_web_search_model_is_env_overridable(self):
-        """
-        What it does: Sets GROK_WEB_SEARCH_MODEL and reloads the config.
-        Purpose: Users with a customised Grok Build models.web_search must be
-                 able to match it without editing source.
-        """
-        import importlib
-        import os
-        from unittest.mock import patch
-
-        import kiro.config as config_module
-
-        with patch.dict(os.environ, {"GROK_WEB_SEARCH_MODEL": "my-search-model"}):
-            importlib.reload(config_module)
-            assert config_module.GROK_WEB_SEARCH_MODEL == "my-search-model"
-            assert "my-search-model" in config_module.MODEL_ALIASES
-
-        importlib.reload(config_module)
+        assert SEARCH_PROXY_MODEL not in MODEL_ALIASES
+        assert not any(model_id.startswith("grok-") for model_id in MODEL_ALIASES)
 
     @pytest.mark.asyncio
-    async def test_model_resolver_advertises_and_resolves_the_id(self):
+    async def test_model_resolver_does_not_advertise_search_proxy(self):
         """
-        What it does: Drives the real ModelResolver with the shipped aliases.
-        Purpose: Proves the id appears in the /v1/models list AND resolves to a
-                 usable Kiro id, which is exactly what Grok Build's
-                 find_model_by_id() lookup needs.
+        What it does: Builds the real resolver from the shipped aliases.
+        Purpose: The proxy is configured by Grok Build, not advertised as chat.
         """
-        import importlib
-
-        import kiro.config as config_module
         from kiro.cache import ModelInfoCache
-        from kiro.model_resolver import ModelResolver, normalize_model_name
-
-        importlib.reload(config_module)
-        ws_model = config_module.GROK_WEB_SEARCH_MODEL
-        aliases = config_module.MODEL_ALIASES
-        target = aliases[ws_model]
+        from kiro.config import MODEL_ALIASES
+        from kiro.model_resolver import ModelResolver
 
         cache = ModelInfoCache()
-        await cache.update([{"modelId": target}])
-        resolver = ModelResolver(cache=cache, aliases=aliases)
+        await cache.update([{"modelId": "claude-opus-4.6"}])
+        resolver = ModelResolver(cache=cache, aliases=MODEL_ALIASES)
 
-        # Advertised in /v1/models -> Grok Build's lookup finds it.
-        assert ws_model in resolver.get_available_models()
-
-        # Resolves onward to the alias target (after the usual normalization,
-        # e.g. "claude-opus-4-6[1m]" -> "claude-opus-4.6").
-        resolution = resolver.resolve(ws_model)
-        assert resolution.internal_id == normalize_model_name(target)
-        assert resolution.internal_id != ws_model
+        available_models = resolver.get_available_models()
+        assert SEARCH_PROXY_MODEL not in available_models
+        assert not any(model_id.startswith("grok-") for model_id in available_models)
 
 
 class TestRequestDetection:
@@ -303,11 +227,11 @@ class TestResponsesPayload:
         Purpose: A missing field fails deserialization -> HTTP 200 but the
                  tool reports "failed".
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
 
         assert payload["object"] == "response"
         assert payload["status"] == "completed"
-        assert payload["model"] == GROK_WEB_SEARCH_MODEL
+        assert payload["model"] == SEARCH_PROXY_MODEL
         assert payload["id"].startswith("resp_")
         assert isinstance(payload["created_at"], int)
         assert isinstance(payload["output"], list) and payload["output"]
@@ -318,7 +242,7 @@ class TestResponsesPayload:
         Purpose: output_text() is the only content Grok Build shows the model,
                  so nothing may be dropped.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
         text = _output_text(payload)
 
         for result in KIRO_MCP_RESULTS["results"]:
@@ -331,7 +255,7 @@ class TestResponsesPayload:
         What it does: Verifies this path never emits literal <web_search> tags.
         Purpose: Grok Build renders output_text verbatim.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
         text = _output_text(payload)
 
         assert "<web_search>" not in text
@@ -342,7 +266,7 @@ class TestResponsesPayload:
         What it does: Runs grok-build's extract_citations logic on the payload.
         Purpose: Annotations must be readable by the real consumer, in order.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
 
         assert _extract_citations(payload) == [
             "https://kiro.dev/docs/chat/webtools/",
@@ -355,7 +279,7 @@ class TestResponsesPayload:
         Purpose: Offsets must select the span describing that very result,
                  otherwise citations render against the wrong text.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
         text = _output_text(payload)
 
         annotations = _annotations(payload)
@@ -374,7 +298,7 @@ class TestResponsesPayload:
         Purpose: An unknown/renamed field can fail rs::Response parsing, which
                  is why annotations were previously left empty.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", KIRO_MCP_RESULTS)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", KIRO_MCP_RESULTS)
 
         for annotation in _annotations(payload):
             assert set(annotation) == {
@@ -400,7 +324,7 @@ class TestResponsesPayload:
                 {"title": "Linked", "url": "https://x.example", "snippet": "s"},
             ]
         }
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", results)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", results)
         text = _output_text(payload)
 
         assert _extract_citations(payload) == ["https://x.example"]
@@ -413,7 +337,7 @@ class TestResponsesPayload:
         What it does: Verifies the no-results case returns a valid Response.
         Purpose: A backend miss must not break deserialization.
         """
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", results)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", results)
 
         assert payload["status"] == "completed"
         assert _output_text(payload) == "No search results found."
@@ -435,7 +359,7 @@ class TestResponsesPayload:
                 }
             ]
         }
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", results)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", results)
         text = _output_text(payload)
 
         assert "Published:" not in text
@@ -449,7 +373,7 @@ class TestResponsesPayload:
                  title consistent with the text.
         """
         results = {"results": [{"url": "https://x.example", "snippet": "s"}]}
-        payload = build_responses_payload(GROK_WEB_SEARCH_MODEL, "q", results)
+        payload = build_responses_payload(SEARCH_PROXY_MODEL, "q", results)
         text = _output_text(payload)
 
         assert "Untitled" in text
@@ -474,10 +398,10 @@ class TestResponsesEndpoint:
 
         from kiro.routes_openai import router
 
-        async def _fake_search(query, auth_manager):
+        async def _fake_search(query, auth_manager=None):
             return "srvtoolu_fake", backend_results
 
-        monkeypatch.setattr("kiro.routes_openai.call_kiro_mcp_api", _fake_search)
+        monkeypatch.setattr("kiro.routes_openai.call_web_search", _fake_search)
 
         app = FastAPI()
         app.include_router(router)
@@ -575,10 +499,10 @@ class TestResponsesEndpoint:
 
         from kiro.routes_openai import router
 
-        async def _failing_search(query, auth_manager):
+        async def _failing_search(query, auth_manager=None):
             return None, None
 
-        monkeypatch.setattr("kiro.routes_openai.call_kiro_mcp_api", _failing_search)
+        monkeypatch.setattr("kiro.routes_openai.call_web_search", _failing_search)
 
         app = FastAPI()
         app.include_router(router)
@@ -596,15 +520,82 @@ class TestResponsesEndpoint:
             )
 
         assert response.status_code == 502
+        assert "WEB_SEARCH_PROVIDER" in response.json()["error"]["message"]
 
-    def test_model_list_advertises_web_search_model_with_context_window(
-        self, monkeypatch
-    ):
+    def test_duckduckgo_mode_does_not_require_kiro_account(self, monkeypatch):
+        """DDG-backed Responses searches must not touch Kiro account selection."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import kiro.routes_openai as routes_openai
+
+        search = AsyncMock(return_value=("srvtoolu_ddg", KIRO_MCP_RESULTS))
+        monkeypatch.setattr(
+            routes_openai,
+            "web_search_requires_kiro_auth",
+            lambda: False,
+        )
+        monkeypatch.setattr(routes_openai, "call_web_search", search)
+
+        app = FastAPI()
+        app.include_router(routes_openai.router)
+        manager = MagicMock()
+        app.state.account_manager = manager
+        app.state.account_system = False
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json=GROK_BUILD_REQUEST,
+                headers=self._auth_headers(),
+            )
+
+        assert response.status_code == 200
+        manager.get_first_account.assert_not_called()
+        manager.get_next_account.assert_not_called()
+        search.assert_awaited_once_with("kiro gateway web search", None)
+
+    def test_kiro_mode_without_account_returns_503(self, monkeypatch):
+        """Kiro MCP searches must fail before dispatch when no account is usable."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import kiro.routes_openai as routes_openai
+
+        search = AsyncMock()
+        monkeypatch.setattr(
+            routes_openai,
+            "web_search_requires_kiro_auth",
+            lambda: True,
+        )
+        monkeypatch.setattr(routes_openai, "call_web_search", search)
+
+        app = FastAPI()
+        app.include_router(routes_openai.router)
+        manager = MagicMock()
+        manager.get_first_account.return_value = None
+        app.state.account_manager = manager
+        app.state.account_system = False
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/responses",
+                json=GROK_BUILD_REQUEST,
+                headers=self._auth_headers(),
+            )
+
+        assert response.status_code == 503
+        assert "Kiro web search" in response.json()["error"]["message"]
+        search.assert_not_awaited()
+
+    def test_model_list_does_not_advertise_search_proxy(self, monkeypatch):
         """
-        What it does: Calls the real /v1/models route and inspects the entry.
-        Purpose: Grok Build reads this list to resolve its web_search model; the
-                 id must be present, and contextWindow must carry the alias
-                 target's real value rather than being omitted.
+        What it does: Calls the real /v1/models route and inspects every id.
+        Purpose: The client-side Responses route must not masquerade as chat.
         """
         from unittest.mock import MagicMock
 
@@ -617,17 +608,12 @@ class TestResponsesEndpoint:
         app.include_router(router)
 
         resolver = MagicMock()
-        resolver.get_available_models.return_value = [
-            "claude-opus-4.6",
-            GROK_WEB_SEARCH_MODEL,
-        ]
+        resolver.get_available_models.return_value = ["claude-opus-4.6"]
         account = MagicMock()
         account.model_resolver = resolver
         manager = MagicMock()
         manager.get_first_account.return_value = account
-        manager.get_model_context_window.side_effect = (
-            lambda model_id: 1_000_000 if model_id == GROK_WEB_SEARCH_MODEL else 200_000
-        )
+        manager.get_model_context_window.return_value = 1_000_000
         app.state.account_manager = manager
         app.state.account_system = False
 
@@ -635,31 +621,20 @@ class TestResponsesEndpoint:
             response = client.get("/v1/models", headers=self._auth_headers())
 
         assert response.status_code == 200
-        entries = {m["id"]: m for m in response.json()["data"]}
-        assert GROK_WEB_SEARCH_MODEL in entries, (
-            "web_search model missing -> Grok Build would fall back to xAI's "
-            "endpoint and bypass this gateway"
-        )
-        assert entries[GROK_WEB_SEARCH_MODEL]["contextWindow"] == 1_000_000
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert SEARCH_PROXY_MODEL not in model_ids
+        assert not any(model_id.startswith("grok-") for model_id in model_ids)
 
 
 class TestGrokBuildConfigTomlContract:
-    """The client half of the fix: Grok Build's config.toml must point here.
+    """The client-side Grok Build config must route search to this gateway."""
 
-    Advertising the model id is necessary but not sufficient. Grok Build only
-    reuses this gateway's base_url when its own config names the model AND
-    defines a `[model."<id>"]` block whose base_url is the gateway. These tests
-    pin the TOML shape that satisfies `find_model_by_id` + `resolve_credentials`
-    so a regression (or a doc copy-paste error) is caught here.
-    """
-
-    # The config.toml stanza this gateway requires. Documented in .env.example.
     REQUIRED_TOML = """
         [models]
-        web_search = "grok-4.20-multi-agent"
+        web_search = "kiro-search-proxy"
 
-        [model."grok-4.20-multi-agent"]
-        model = "grok-4.20-multi-agent"
+        [model.kiro-search-proxy]
+        model = "kiro-search-proxy"
         base_url = "http://localhost:8000/v1"
         env_key = "GROK_CODE_XAI_API_KEY"
         api_backend = "responses"
@@ -675,10 +650,7 @@ class TestGrokBuildConfigTomlContract:
 
     @staticmethod
     def _find_model_by_id(models: dict, model_id: str):
-        """Mirror of grok-build find_model_by_id (config.rs:3316).
-
-        Looks up by table key, then by the entry's `model` field.
-        """
+        """Mirror Grok Build's model lookup by key and model field."""
         if model_id in models:
             return models[model_id]
         for entry in models.values():
@@ -687,113 +659,55 @@ class TestGrokBuildConfigTomlContract:
         return None
 
     def test_required_stanza_resolves_to_the_gateway(self):
-        """
-        What it does: Parses the documented stanza and runs the lookup on it.
-        Purpose: Proves the config we tell users to write actually satisfies
-                 find_model_by_id and yields the gateway's base_url.
-        """
+        """The documented client entry must resolve to /v1/responses."""
         cfg = self._parse(self.REQUIRED_TOML)
-        ws_id = cfg["models"]["web_search"]
+        search_model = cfg["models"]["web_search"]
 
-        entry = self._find_model_by_id(cfg.get("model", {}), ws_id)
-        assert entry is not None, "find_model_by_id must locate the web_search model"
-        assert entry["base_url"] == "http://localhost:8000/v1"
-        # WebSearchClient::search appends /responses to base_url.
+        assert search_model == SEARCH_PROXY_MODEL
+        entry = self._find_model_by_id(cfg.get("model", {}), search_model)
+        assert entry is not None
+        assert entry["model"] == SEARCH_PROXY_MODEL
         assert entry["base_url"].rstrip("/") + "/responses" == (
             "http://localhost:8000/v1/responses"
         )
 
-    def test_stanza_model_id_matches_gateway_default(self):
-        """
-        What it does: Cross-checks the stanza id against GROK_WEB_SEARCH_MODEL.
-        Purpose: A mismatch between the two sides silently reintroduces the bug.
-        """
-        import importlib
-
-        import kiro.config as config_module
-
-        importlib.reload(config_module)
+    def test_proxy_name_is_a_valid_bare_toml_key(self):
+        """The hyphenated proxy id must parse without quoted dotted-key traps."""
         cfg = self._parse(self.REQUIRED_TOML)
 
-        assert cfg["models"]["web_search"] == config_module.GROK_WEB_SEARCH_MODEL
+        assert SEARCH_PROXY_MODEL in cfg["model"]
 
-    def test_unquoted_key_breaks_lookup(self):
-        """
-        What it does: Parses the same block with an UNQUOTED table key.
-        Purpose: Regression guard for a real trap hit while fixing this. The id
-                 contains a dot, so `[model.grok-4.20-multi-agent]` becomes the
-                 nested table model.grok-4 -> "20-multi-agent". The key must be
-                 quoted or find_model_by_id fails and Grok Build silently falls
-                 back to xAI's endpoint.
-        """
-        broken = self._parse(
-            """
-            [models]
-            web_search = "grok-4.20-multi-agent"
-
-            [model.grok-4.20-multi-agent]
-            base_url = "http://localhost:8000/v1"
-            """
-        )
-
-        # Parsed as a nested table, so the flat key does not exist...
-        assert "grok-4.20-multi-agent" not in broken["model"]
-        assert "grok-4" in broken["model"]
-        # ...and there is no `model` field at the top level to rescue it either.
-        assert self._find_model_by_id(broken["model"], "grok-4.20-multi-agent") is None
-
-    def test_missing_base_url_would_bypass_the_gateway(self):
-        """
-        What it does: Parses a stanza whose model block omits base_url.
-        Purpose: Documents that the entry alone is not enough -- without
-                 base_url, resolve_credentials has no gateway URL to reuse.
-        """
+    def test_missing_base_url_cannot_route_to_gateway(self):
+        """A client model entry without base_url is insufficient."""
         cfg = self._parse(
             """
             [models]
-            web_search = "grok-4.20-multi-agent"
+            web_search = "kiro-search-proxy"
 
-            [model."grok-4.20-multi-agent"]
-            model = "grok-4.20-multi-agent"
+            [model.kiro-search-proxy]
+            model = "kiro-search-proxy"
             """
         )
         entry = self._find_model_by_id(cfg["model"], cfg["models"]["web_search"])
 
         assert entry is not None
-        assert "base_url" not in entry, (
-            "a model entry without base_url cannot route the search to the gateway"
-        )
+        assert "base_url" not in entry
 
-    def test_env_example_documents_the_web_search_model(self):
-        """
-        What it does: Greps .env.example for the GROK_WEB_SEARCH_MODEL guidance.
-        Purpose: The client-side config.toml requirement is invisible from the
-                 gateway alone, so the docs must state it.
-        """
+    def test_env_example_documents_client_side_proxy(self):
+        """The example env file must explain the client-only search route."""
         from pathlib import Path
 
         text = Path(".env.example").read_text(encoding="utf-8")
 
-        assert "GROK_WEB_SEARCH_MODEL" in text
-        assert "/v1/responses" in text
+        assert "[model.kiro-search-proxy]" in text
+        assert "not advertise it in /v1/models" in text
 
     def test_readme_toml_example_is_valid_and_resolves(self):
-        """
-        What it does: Extracts the TOML block from README.md, parses it, and
-                      runs the same find_model_by_id lookup against it.
-        Purpose: Users copy-paste this block. If it drifts (or loses the quotes
-                 around the dotted key) their web_search silently goes to xAI,
-                 so the doc example must stay executable.
-        """
-        import importlib
+        """The README's copy-paste TOML must route search to this gateway."""
         import re
         from pathlib import Path
 
-        import kiro.config as config_module
-
-        importlib.reload(config_module)
         readme = Path("README.md").read_text(encoding="utf-8")
-
         blocks = [
             block
             for block in re.findall(r"```toml\n(.*?)```", readme, re.DOTALL)
@@ -802,15 +716,12 @@ class TestGrokBuildConfigTomlContract:
         assert blocks, "README must document the config.toml web_search stanza"
 
         cfg = self._parse(blocks[0])
-        ws_id = cfg["models"]["web_search"]
-        assert ws_id == config_module.GROK_WEB_SEARCH_MODEL
+        search_model = cfg["models"]["web_search"]
+        assert search_model == SEARCH_PROXY_MODEL
 
-        entry = self._find_model_by_id(cfg.get("model", {}), ws_id)
-        assert entry is not None, (
-            "README example must survive find_model_by_id -- check the dotted "
-            "table key is quoted"
-        )
-        assert entry["base_url"].startswith("http://localhost:8000")
+        entry = self._find_model_by_id(cfg.get("model", {}), search_model)
+        assert entry is not None
+        assert entry["base_url"] == "http://localhost:8000/v1"
 
 
 class TestAliasContextWindowInheritance:
@@ -845,10 +756,12 @@ class TestAliasContextWindowInheritance:
         manager = AccountManager.__new__(AccountManager)
         manager._accounts = {"acct": account}
 
+        alias_model = "my-opus"
+
         # Direct hit still works.
         assert manager.get_model_context_window(real_model) == 1_000_000
-        # Alias resolves through the resolver, then hits the cache.
-        assert manager.get_model_context_window(GROK_WEB_SEARCH_MODEL) == 1_000_000
+        # A generic alias resolves through the resolver, then hits the cache.
+        assert manager.get_model_context_window(alias_model) == 1_000_000
 
     def test_unresolvable_model_returns_none(self):
         """

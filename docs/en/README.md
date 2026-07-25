@@ -37,24 +37,6 @@ Made with ❤️ by [@oddstab](https://github.com/oddstab)
 | 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
-### Grok Compatibility
-
-The gateway supports Grok model names as aliases, making it a drop-in replacement for xAI API:
-
-| Grok Model | Default Maps To |
-|------------|---------|
-| `grok-4.5` | `claude-opus-4-6[1m]` |
-| `grok-4` | `claude-opus-4-6[1m]` |
-| `grok-4-fast` | `claude-opus-4-6[1m]` |
-| `grok-3` | `claude-opus-4-6[1m]` |
-
-Set `GROK_TARGET_MODEL` in `.env` to customize the target model:
-
-```env
-# Defaults to claude-opus-4-6[1m], can be any supported model
-GROK_TARGET_MODEL="claude-opus-4-8[1m]"
-```
-
 ### Open Models
 
 | Model | Context | Cost | Region | Free | Pro | Pro+ | Power |
@@ -65,7 +47,7 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 | 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
-> 💡 **Smart Model Resolution:** Use any model name format — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, or even versioned names like `claude-sonnet-4-5-20250929`. The gateway normalizes them automatically.
+> 💡 **Smart Model Resolution:** Use formats such as `claude-sonnet-4-5`, `claude-sonnet-4.5`, or versioned names like `claude-sonnet-4-5-20250929`. The gateway normalizes them automatically.
 
 ---
 
@@ -562,25 +544,31 @@ cc() {
 
 ### Grok Build
 
-Set environment variables to point Grok Build at this gateway (Grok model names auto-map to Claude models):
+Point Grok Build at this gateway and select an actual Kiro model id from
+`/v1/models`; `grok-*` names are not aliases for Claude models.
 
 ```powershell
 # PowerShell profile
 function gg {
     $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
     $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # matches PROXY_API_KEY in .env
-    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+    & "$env:USERPROFILE\.grok\bin\grok.exe" @args
 }
 ```
 
-Grok Build requests like `grok-4` auto-map to `GROK_TARGET_MODEL` (defaults to `claude-opus-4.6`, configurable in `.env`).
+For web search, configure `models.web_search = "kiro-search-proxy"` and a
+client-side `[model.kiro-search-proxy]` entry pointing at
+`http://localhost:8000/v1` with `api_backend = "responses"`. This proxy id is
+not advertised by the gateway as a chat model. The search backend is selected
+in the gateway's `.env`: `WEB_SEARCH_PROVIDER=kiro` (default, Kiro MCP) or
+`WEB_SEARCH_PROVIDER=duckduckgo` (`ddg` and `duckgo` are accepted aliases).
 
 **Linux/macOS:**
 ```bash
 gg() {
     GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
     GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
-    grok --disable-web-search "$@"
+    grok "$@"
 }
 ```
 

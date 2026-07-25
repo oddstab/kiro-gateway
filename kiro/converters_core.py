@@ -45,6 +45,7 @@ from kiro.config import (
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
 )
+from kiro.model_capabilities import resolve_native_reasoning_format
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
@@ -142,9 +143,9 @@ def get_native_reasoning_format(
     """
     Determine the Kiro native reasoning schema for a model.
 
-    Dynamic model metadata is authoritative when it includes
-    additionalModelRequestFieldsSchema. Family fallback is used only when that
-    schema is absent, which covers hidden and static model definitions.
+    Thin wrapper that applies the NATIVE_REASONING kill switch and then defers
+    to kiro.model_capabilities, the single source of truth shared by /v1/models
+    and every request converter (OpenAI/Anthropic, streaming/non-streaming).
 
     Args:
         model_id: Resolved Kiro model ID
@@ -152,36 +153,12 @@ def get_native_reasoning_format(
 
     Returns:
         "reasoning" for GPT-style fields, "output_config" for Claude-style
-        fields, or None when native reasoning is unavailable
+        fields, or None when native reasoning must not be sent
     """
     if not NATIVE_REASONING_ENABLED:
         return None
 
-    schema: Any = None
-    if model_info:
-        schema = model_info.get("additionalModelRequestFieldsSchema")
-        if isinstance(schema, str):
-            try:
-                schema = json.loads(schema)
-            except json.JSONDecodeError:
-                logger.warning("Ignoring invalid additionalModelRequestFieldsSchema JSON")
-                return None
-
-    if isinstance(schema, dict):
-        properties = schema.get("properties", {})
-        if isinstance(properties, dict):
-            if "reasoning" in properties:
-                return "reasoning"
-            if "output_config" in properties:
-                return "output_config"
-        return None
-
-    normalized = model_id.lower().replace("_", "-")
-    if "gpt-5-6" in normalized or "gpt-5.6" in normalized:
-        return "reasoning"
-    if "claude" in normalized:
-        return "output_config"
-    return None
+    return resolve_native_reasoning_format(model_id, model_info)
 
 
 def normalize_native_reasoning_effort(effort: Any) -> Any:

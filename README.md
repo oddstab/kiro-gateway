@@ -37,24 +37,6 @@
 | 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
-### Grok 相容性
-
-閘道器支援 Grok 模型名稱作為別名，可直接替代 xAI API：
-
-| Grok 模型 | 預設對應 |
-|-----------|---------|
-| `grok-4.5` | `claude-opus-4-6[1m]` |
-| `grok-4` | `claude-opus-4-6[1m]` |
-| `grok-4-fast` | `claude-opus-4-6[1m]` |
-| `grok-3` | `claude-opus-4-6[1m]` |
-
-在 `.env` 中設定 `GROK_TARGET_MODEL` 可自訂對應模型：
-
-```env
-# 預設為 claude-opus-4-6[1m]，可改為任何支援的模型
-GROK_TARGET_MODEL="claude-opus-4-8[1m]"
-```
-
 ### 開源模型
 
 | 模型 | Context | 成本 | 區域 | Free | Pro | Pro+ | Power |
@@ -65,7 +47,7 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 | 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
-> 💡 **智慧模型解析：** 使用任何模型名稱格式 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`，甚至版本化名稱如 `claude-sonnet-4-5-20250929`。閘道器會自動正規化。
+> 💡 **智慧模型解析：** 可使用 `claude-sonnet-4-5`、`claude-sonnet-4.5`，或 `claude-sonnet-4-5-20250929` 等版本化名稱；閘道器會自動正規化。
 
 ---
 
@@ -564,7 +546,9 @@ cc() {
 
 #### 步驟 1：把 Grok Build 指向閘道器
 
-設定環境變數（透過 Grok 別名自動對應 Claude 模型）：
+設定環境變數，並在 `~/.grok/config.toml` 的 `[models].default` 使用 `/v1/models`
+實際列出的 Kiro model id（例如 `claude-haiku-4.5`）。閘道器不再把 `grok-*`
+名稱轉譯成 Claude 模型。
 
 ```powershell
 # PowerShell profile
@@ -584,76 +568,47 @@ gg() {
 }
 ```
 
-Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4-6[1m]`，可在 `.env` 中修改）。
-
 #### 步驟 2：設定 web_search（想用網頁搜尋才需要）
 
-只做步驟 1 的話，聊天可以正常運作，但 `web_search` 工具**不會**經過閘道器。
-原因是 Grok Build 的 web_search 走的是獨立的解析路徑，`GROK_XAI_API_BASE_URL`
-對它無效（詳見下方原理說明）。
-
-在 `~/.grok/config.toml` 加入這兩段：
+在 `~/.grok/config.toml` 合併以下設定；若已有 `[models]`，請直接加入欄位，
+不要建立第二個同名表格：
 
 ```toml
 [models]
-web_search = "grok-4.20-multi-agent"
+default = "claude-haiku-4.5"
+web_search = "kiro-search-proxy"
 
-# 鍵名務必加引號！id 含小數點，裸鍵會被 TOML 解析成巢狀表格
-# （model.grok-4 → "20-multi-agent"），Grok Build 就找不到這個模型，
-# 而且不會有任何錯誤訊息。
-[model."grok-4.20-multi-agent"]
-model = "grok-4.20-multi-agent"
-base_url = "http://localhost:8000/v1"   # 指向本閘道器
-env_key = "GROK_CODE_XAI_API_KEY"       # 沿用步驟 1 的 API key
+[model.kiro-search-proxy]
+model = "kiro-search-proxy"
+base_url = "http://localhost:8000/v1"
+env_key = "GROK_CODE_XAI_API_KEY"
 api_backend = "responses"
 context_window = 1000000
 ```
 
-重啟閘道器與 Grok Build 後即可使用。搜尋結果由 Kiro 的 MCP web_search 提供，
-以 OpenAI Responses API 格式（含 `url_citation` 引用）回傳。
+`kiro-search-proxy` 只是 Grok Build 本機的 Responses API 路由名稱，不是 Kiro
+聊天模型，也不會出現在 Gateway 的 `/v1/models`。Grok Build 會從上面的 model
+區塊取得 `base_url`，再直接呼叫 `POST /v1/responses`；因此不需要任何額外的
+Gateway alias 環境變數。
 
-> **不需要 `--disable-web-search`。** 舊版文件建議加這個參數，是因為當時
-> web_search 無法正常運作（會在畫面上吐出 `<web_search>` 標籤原文）。現在可以移除。
+搜尋後端由 Gateway 的 `.env` 控制：
 
-**驗證是否生效**：閘道器日誌應出現這行
+```env
+# Kiro 原生 MCP 搜尋（預設，需要可用的 Kiro 帳號）
+WEB_SEARCH_PROVIDER=kiro
 
+# 或改用 DuckDuckGo（也接受 ddg / duckgo）
+WEB_SEARCH_PROVIDER=duckduckgo
 ```
-Grok Build web_search request (Responses API): query='...'
-```
 
-若沒有出現，代表請求跑去 xAI 官方端點了 —— 請檢查 `config.toml` 的表格鍵名有沒有加引號。
+重啟閘道器與 Grok Build 後即可使用。Gateway 會以 OpenAI Responses API 格式（含 `url_citation` 引用）回傳。
 
-#### 模型 id 不一致時
+> **不需要 `--disable-web-search`。** 若設定正確，閘道器日誌會出現：
+>
+> `Grok Build web_search request (Responses API): query='...'`
 
-預設值 `grok-4.20-multi-agent` 對應 Grok Build 內建的 `default_web_search_model()`。
-若你自訂了別的 id，兩邊都要改成一致：
-
-| 位置 | 設定 |
-|------|------|
-| 閘道器 | `.env` 的 `GROK_WEB_SEARCH_MODEL` |
-| Grok Build | `config.toml` 的 `[models].web_search` 與對應的 `[model."..."]` 區塊 |
-
-#### 原理：為什麼需要步驟 2
-
-Grok Build 的 `web_search` **不是**靠模型輸出 `<web_search>` 標籤再由閘道器解析，
-而是實際發出一個後端請求：`POST {base_url}/responses`。
-
-發送前它會先拿 `models.web_search` 這個 id 去模型清單裡查，決定要打哪個 base_url：
-
-| 情況 | 結果 |
-|------|------|
-| 在 `/v1/models` 中找到 | 沿用該模型的 `base_url` → 請求進入本閘道器 ✅ |
-| 找不到 | 退回 xAI 官方端點 → 閘道器收不到請求，搜尋失敗 ❌ |
-
-關鍵在於這個 fallback 只讀 `models_base_url` 與內建的 proxy 預設值，
-**不看 `GROK_XAI_API_BASE_URL`**。所以光設環境變數不夠，必須在 `config.toml`
-明確定義該模型，讓查找命中第一種情況。閘道器這一側也會在 `/v1/models`
-通告這個 id 來配合。
-
-另外，閘道器會偵測「客戶端自己帶了 `web_search` 工具」的情況（Grok Build 就是），
-此時不再注入同名工具、也不攔截該工具呼叫，直接把 tool call 原樣交還給客戶端執行。
-先前畫面上會出現 `<web_search>` 標籤原文，就是因為閘道器搶走了客戶端的工具呼叫，
-再把帶標籤的文字塞進回應內容。沒有自帶搜尋能力的客戶端行為不變，仍由閘道器代跑。
+閘道器也會偵測客戶端自帶的 `web_search` 工具，避免重複注入或攔截 tool call；
+沒有自帶搜尋能力的客戶端則維持原本由閘道器代跑搜尋的行為。
 
 ### 其他工具
 

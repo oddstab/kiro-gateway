@@ -5,7 +5,7 @@ httpx
 loguru
 python-dotenv
 tiktoken
-duckduckgo-search
+ddgs==9.14.4
 
 # Testing dependencies
 pytest

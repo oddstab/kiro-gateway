@@ -451,7 +451,24 @@ def extract_thinking_config_from_anthropic(
     model_id: str = "",
     model_info: Optional[Dict[str, Any]] = None,
 ) -> ThinkingConfig:
-    """Extract native Kiro reasoning fields or configure the fake fallback."""
+    """
+    Extract native Kiro reasoning fields or configure the fake fallback.
+
+    Native fields require an explicit client request AND model support confirmed
+    by get_native_reasoning_format() (AWS additionalModelRequestFieldsSchema for
+    dynamic models, explicit whitelist for static/hidden ones). Models without
+    that support fall back to prompt-based fake reasoning, so a client sending
+    `thinking` to e.g. claude-haiku-4.5 never produces
+    additionalModelRequestFields.
+
+    Args:
+        request: Anthropic MessagesRequest
+        model_id: Resolved Kiro model ID
+        model_info: Optional ListAvailableModels metadata
+
+    Returns:
+        ThinkingConfig for the core layer
+    """
     thinking = request.thinking if isinstance(request.thinking, dict) else None
     output_config = request.output_config if isinstance(request.output_config, dict) else None
 

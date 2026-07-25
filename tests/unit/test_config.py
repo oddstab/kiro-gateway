@@ -282,6 +282,39 @@ class TestTimeoutConfigurationWarning:
             assert "Recommendation" in captured.err or "LESS than" in captured.err
 
 
+class TestFakeReasoningConfig:
+    """Tests for the opt-in fake reasoning configuration."""
+
+    def test_fake_reasoning_is_disabled_by_default(self):
+        """FAKE_REASONING must default to false when no override is supplied."""
+        import importlib
+        import kiro.config as config_module
+
+        original_getenv = os.getenv
+
+        def mock_getenv(key, default=None):
+            if key == "FAKE_REASONING":
+                return default
+            return original_getenv(key, default)
+
+        with patch.object(os, "getenv", side_effect=mock_getenv):
+            importlib.reload(config_module)
+            assert config_module.FAKE_REASONING_ENABLED is False
+
+        importlib.reload(config_module)
+
+    def test_fake_reasoning_can_be_enabled_explicitly(self):
+        """FAKE_REASONING=true must retain the explicit opt-in behavior."""
+        import importlib
+        import kiro.config as config_module
+
+        with patch.dict(os.environ, {"FAKE_REASONING": "true"}):
+            importlib.reload(config_module)
+            assert config_module.FAKE_REASONING_ENABLED is True
+
+        importlib.reload(config_module)
+
+
 class TestAwsSsoOidcUrlConfig:
     """Tests for AWS SSO OIDC URL configuration."""
     
@@ -804,6 +837,55 @@ class TestWebSearchConfig:
         
         print(f"Comparing WEB_SEARCH_ENABLED: Expected False, Got {config_module.WEB_SEARCH_ENABLED}")
         assert config_module.WEB_SEARCH_ENABLED is False
+
+
+class TestWebSearchProviderConfig:
+    """Tests for selecting the gateway-executed web-search backend."""
+
+    def test_web_search_provider_defaults_to_kiro(self):
+        """WEB_SEARCH_PROVIDER must default to Kiro when no override is supplied."""
+        import importlib
+        import kiro.config as config_module
+
+        original_getenv = os.getenv
+
+        def mock_getenv(key, default=None):
+            if key == "WEB_SEARCH_PROVIDER":
+                return default
+            return original_getenv(key, default)
+
+        with patch.object(os, "getenv", side_effect=mock_getenv):
+            importlib.reload(config_module)
+            assert config_module.WEB_SEARCH_PROVIDER == "kiro"
+
+        importlib.reload(config_module)
+
+    @pytest.mark.parametrize(
+        ("configured_value", "expected"),
+        [
+            ("kiro", "kiro"),
+            ("duckduckgo", "duckduckgo"),
+            ("ddg", "duckduckgo"),
+            ("duckgo", "duckduckgo"),
+            ("  DDG  ", "duckduckgo"),
+        ],
+    )
+    def test_web_search_provider_aliases_are_normalized(
+        self,
+        configured_value,
+        expected,
+    ):
+        """Documented aliases must resolve to one canonical provider name."""
+        from kiro.config import normalize_web_search_provider
+
+        assert normalize_web_search_provider(configured_value) == expected
+
+    def test_invalid_web_search_provider_is_rejected(self):
+        """Unsupported providers must fail at startup with an actionable message."""
+        from kiro.config import normalize_web_search_provider
+
+        with pytest.raises(ValueError, match="WEB_SEARCH_PROVIDER must be one of"):
+            normalize_web_search_provider("bing")
 
 
 # ==================================================================================================

@@ -11,6 +11,12 @@ import pytest
 
 from kiro.cache import ModelInfoCache
 from kiro.config import DEFAULT_MAX_INPUT_TOKENS
+from kiro.model_capabilities import (
+    MODEL_SOURCE_DYNAMIC,
+    MODEL_SOURCE_KEY,
+    MODEL_SOURCE_STATIC,
+    resolve_native_reasoning_format,
+)
 
 
 class TestModelInfoCacheInitialization:
@@ -435,3 +441,129 @@ class TestModelInfoCacheThreadSafety:
         print("Проверка: Все чтения вернули одинаковый результат...")
         assert all(r is not None for r in results)
         assert all(r["modelId"] == "claude-sonnet-4" for r in results)
+
+
+class TestModelInfoCacheMetadataProvenance:
+    """
+    Tests for the metadata provenance marker.
+
+    Capability detection needs to know whether a cache entry came from AWS
+    ListAvailableModels (its additionalModelRequestFieldsSchema is the contract)
+    or from a local static list (no schema exists, whitelist only).
+    """
+
+    @pytest.mark.asyncio
+    async def test_update_defaults_to_dynamic_source(self):
+        """
+        What it does: Updates the cache without specifying a source.
+        Purpose: ListAvailableModels is the common caller; default accordingly.
+        """
+        cache = ModelInfoCache()
+        await cache.update([{"modelId": "claude-haiku-4.5"}])
+
+        assert cache.get("claude-haiku-4.5")[MODEL_SOURCE_KEY] == MODEL_SOURCE_DYNAMIC
+
+    @pytest.mark.asyncio
+    async def test_update_tags_static_source(self):
+        """
+        What it does: Updates the cache with the static source marker.
+        Purpose: FALLBACK_MODELS entries must be distinguishable from AWS data.
+        """
+        cache = ModelInfoCache()
+        await cache.update(
+            [{"modelId": "claude-haiku-4.5"}], source=MODEL_SOURCE_STATIC
+        )
+
+        assert cache.get("claude-haiku-4.5")[MODEL_SOURCE_KEY] == MODEL_SOURCE_STATIC
+
+    @pytest.mark.asyncio
+    async def test_update_preserves_original_metadata_fields(self):
+        """
+        What it does: Verifies tagging does not drop AWS fields.
+        Purpose: The schema itself must survive the tagging step.
+        """
+        schema = {"properties": {"output_config": {}}}
+        cache = ModelInfoCache()
+        await cache.update(
+            [
+                {
+                    "modelId": "claude-opus-4.8",
+                    "tokenLimits": {"maxInputTokens": 1_000_000},
+                    "additionalModelRequestFieldsSchema": schema,
+                }
+            ]
+        )
+
+        entry = cache.get("claude-opus-4.8")
+        assert entry["additionalModelRequestFieldsSchema"] == schema
+        assert entry["tokenLimits"]["maxInputTokens"] == 1_000_000
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_mutate_input_dicts(self):
+        """
+        What it does: Updates the cache with a shared config-owned list.
+        Purpose: FALLBACK_MODELS lives in kiro.config; mutating it would leak a
+                 provenance marker into every later cache and every test.
+        """
+        source_models = [{"modelId": "claude-haiku-4.5"}]
+        cache = ModelInfoCache()
+
+        await cache.update(source_models, source=MODEL_SOURCE_STATIC)
+
+        assert source_models == [{"modelId": "claude-haiku-4.5"}]
+
+    @pytest.mark.asyncio
+    async def test_real_fallback_models_are_not_mutated(self):
+        """
+        What it does: Feeds the real FALLBACK_MODELS list into a cache.
+        Purpose: Guard the actual shared constant, not just a copy of it.
+        """
+        from kiro.config import FALLBACK_MODELS
+
+        cache = ModelInfoCache()
+        await cache.update(FALLBACK_MODELS, source=MODEL_SOURCE_STATIC)
+
+        assert all(MODEL_SOURCE_KEY not in model for model in FALLBACK_MODELS)
+
+    def test_hidden_models_are_tagged_static(self):
+        """
+        What it does: Adds a hidden model and inspects its provenance.
+        Purpose: Hidden models have no AWS schema, so they must not be judged
+                 by one (and must not inherit a family guess).
+        """
+        cache = ModelInfoCache()
+        cache.add_hidden_model("claude-3.7-sonnet", "CLAUDE_3_7_SONNET_20250219_V1_0")
+
+        entry = cache.get("claude-3.7-sonnet")
+        assert entry[MODEL_SOURCE_KEY] == MODEL_SOURCE_STATIC
+        assert resolve_native_reasoning_format("claude-3.7-sonnet", entry) is None
+
+    @pytest.mark.asyncio
+    async def test_dynamic_haiku_entry_has_no_native_reasoning(self):
+        """
+        What it does: Caches realistic Haiku metadata and resolves capability.
+        Purpose: End-to-end check of the exact bug through the cache layer.
+        """
+        cache = ModelInfoCache()
+        await cache.update(
+            [
+                {
+                    "modelId": "claude-haiku-4.5",
+                    "modelName": "Claude Haiku 4.5",
+                    "tokenLimits": {"maxInputTokens": 200000},
+                },
+                {
+                    "modelId": "claude-opus-4.8",
+                    "additionalModelRequestFieldsSchema": {
+                        "properties": {"output_config": {}}
+                    },
+                },
+            ]
+        )
+
+        assert resolve_native_reasoning_format(
+            "claude-haiku-4.5", cache.get("claude-haiku-4.5")
+        ) is None
+        assert resolve_native_reasoning_format(
+            "claude-opus-4.8", cache.get("claude-opus-4.8")
+        ) == "output_config"

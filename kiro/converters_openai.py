@@ -340,9 +340,12 @@ def extract_thinking_config_from_openai(
     """
     Extract native reasoning fields or configure the prompt-based fallback.
 
-    Native fields are emitted only when the client explicitly requests
-    reasoning. Model metadata is preferred; hidden/static models use the
-    verified Claude/GPT-5.6 family fallback in get_native_reasoning_format().
+    Native fields are emitted only when the client explicitly requests reasoning
+    AND get_native_reasoning_format() confirms the model supports it. For AWS
+    models that confirmation comes from additionalModelRequestFieldsSchema; for
+    static/hidden models from an explicit whitelist. Unsupported models fall
+    back to prompt-based fake reasoning, so a client sending reasoning_effort to
+    e.g. claude-haiku-4.5 never produces additionalModelRequestFields.
 
     Args:
         request: OpenAI ChatCompletionRequest

@@ -31,6 +31,11 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from kiro.config import MODEL_CACHE_TTL, DEFAULT_MAX_INPUT_TOKENS
+from kiro.model_capabilities import (
+    MODEL_SOURCE_DYNAMIC,
+    MODEL_SOURCE_KEY,
+    MODEL_SOURCE_STATIC,
+)
 
 
 class ModelInfoCache:
@@ -62,19 +67,35 @@ class ModelInfoCache:
         self._last_update: Optional[float] = None
         self._cache_ttl = cache_ttl
     
-    async def update(self, models_data: List[Dict[str, Any]]) -> None:
+    async def update(
+        self,
+        models_data: List[Dict[str, Any]],
+        source: str = MODEL_SOURCE_DYNAMIC,
+    ) -> None:
         """
         Updates the model cache.
         
-        Thread-safely replaces cache contents with new data.
+        Thread-safely replaces cache contents with new data. Each entry is
+        tagged with its provenance so capability detection knows whether the
+        metadata carries an authoritative AWS schema (dynamic) or is a local
+        static definition with no schema at all.
         
         Args:
             models_data: List of dictionaries with model information.
                         Each dictionary must contain the "modelId" key.
+            source: MODEL_SOURCE_DYNAMIC for ListAvailableModels responses,
+                   MODEL_SOURCE_STATIC for FALLBACK_MODELS / offline lists.
         """
         async with self._lock:
-            logger.info(f"Updating model cache. Found {len(models_data)} models.")
-            self._cache = {model["modelId"]: model for model in models_data}
+            logger.info(
+                f"Updating model cache. Found {len(models_data)} models (source={source})."
+            )
+            # Copy each entry before tagging: FALLBACK_MODELS dicts live in
+            # kiro.config and must never be mutated by a cache update.
+            self._cache = {
+                model["modelId"]: {**model, MODEL_SOURCE_KEY: source}
+                for model in models_data
+            }
             self._last_update = time.time()
     
     def get(self, model_id: str) -> Optional[Dict[str, Any]]:
@@ -123,6 +144,9 @@ class ModelInfoCache:
                 "tokenLimits": {"maxInputTokens": DEFAULT_MAX_INPUT_TOKENS},
                 "_internal_id": internal_id,  # Store internal ID for reference
                 "_is_hidden": True,  # Mark as hidden model
+                # No AWS schema exists for hidden models: capability detection
+                # must fall back to the explicit static whitelist.
+                MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
             }
             logger.debug(f"Added hidden model: {display_name} → {internal_id}")
     

@@ -37,24 +37,6 @@
 | 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
-### Grok 互換性
-
-ゲートウェイは Grok モデル名をエイリアスとしてサポートし、xAI API のドロップイン代替として使用可能：
-
-| Grok モデル | デフォルトマッピング先 |
-|------------|------------|
-| `grok-4.5` | `claude-opus-4-6[1m]` |
-| `grok-4` | `claude-opus-4-6[1m]` |
-| `grok-4-fast` | `claude-opus-4-6[1m]` |
-| `grok-3` | `claude-opus-4-6[1m]` |
-
-`.env` で `GROK_TARGET_MODEL` を設定してマッピング先をカスタマイズ可能：
-
-```env
-# デフォルトは claude-opus-4-6[1m]、任意のサポートモデルに変更可能
-GROK_TARGET_MODEL="claude-opus-4-8[1m]"
-```
-
 ### オープンモデル
 
 | モデル | Context | コスト | リージョン | Free | Pro | Pro+ | Power |
@@ -65,7 +47,7 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 | 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
-> 💡 **スマートモデル解決:** どんなモデル名形式でも使用可能 — `claude-sonnet-4-5`、`claude-sonnet-4.5`、`grok-4`、または `claude-sonnet-4-5-20250929` のようなバージョン付き名前も。ゲートウェイが自動的に正規化します。
+> 💡 **スマートモデル解決:** `claude-sonnet-4-5`、`claude-sonnet-4.5`、または `claude-sonnet-4-5-20250929` のようなバージョン付き名前を使用できます。ゲートウェイが自動的に正規化します。
 
 ---
 
@@ -562,25 +544,30 @@ cc() {
 
 ### Grok Build
 
-環境変数を設定して Grok Build をゲートウェイに接続（Grok モデル名は自動的に Claude モデルにマッピング）：
+Grok Build をこのゲートウェイに接続し、`/v1/models` に表示される実際の Kiro
+モデル id を選択してください。`grok-*` 名は Claude モデルのエイリアスではありません。
 
 ```powershell
 # PowerShell profile
 function gg {
     $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
     $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # .env の PROXY_API_KEY に対応
-    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+    & "$env:USERPROFILE\.grok\bin\grok.exe" @args
 }
 ```
 
-Grok Build の `grok-4` 等のリクエストは自動的に `GROK_TARGET_MODEL`（デフォルト `claude-opus-4.6`、`.env` で変更可能）にマッピングされます。
+ウェブ検索には `models.web_search = "kiro-search-proxy"` と、
+`http://localhost:8000/v1` を指す `[model.kiro-search-proxy]` エントリを
+`api_backend = "responses"` で設定してください。この proxy id はチャットモデルとして公開されません。
+検索バックエンドはゲートウェイの `.env` で `WEB_SEARCH_PROVIDER=kiro`（デフォルトの Kiro MCP）
+または `WEB_SEARCH_PROVIDER=duckduckgo`（`ddg`、`duckgo` も可）を選択します。
 
 **Linux/macOS:**
 ```bash
 gg() {
     GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
     GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
-    grok --disable-web-search "$@"
+    grok "$@"
 }
 ```
 

@@ -452,9 +452,10 @@ async def stream_kiro_to_anthropic(
                 if tool_name == "web_search" and not client_provides_web_search(
                     request_tools
                 ):
-                    from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
-                    
-                    logger.info("Intercepted web_search tool call (Path B - MCP emulation)")
+                    from kiro.mcp_tools import generate_search_summary
+                    from kiro.web_search_provider import call_web_search
+
+                    logger.info("Intercepted web_search tool call (Path B - gateway emulation)")
                     
                     # Parse tool_input if string
                     if isinstance(tool_input, str):
@@ -466,16 +467,17 @@ async def stream_kiro_to_anthropic(
                     # Extract query
                     query = tool_input.get("query", "")
                     if not query:
-                        logger.warning("web_search called without query, skipping MCP call")
+                        logger.warning("web_search called without query, skipping provider call")
                         continue
                     
                     logger.debug(f"WebSearch query (Path B): {query}")
                     
-                    # Call MCP API
-                    mcp_tool_use_id, results = await call_kiro_mcp_api(query, auth_manager)
-                    
+                    mcp_tool_use_id, results = await call_web_search(
+                        query, auth_manager
+                    )
+
                     if results is None:
-                        logger.error("MCP API call failed for web_search")
+                        logger.error("Configured provider failed for web_search")
                         # Continue with normal tool_use processing (will show error to user)
                     else:
                         # Emit server_tool_use + web_search_tool_result + text summary

@@ -673,8 +673,8 @@ async def handle_native_web_search(
     """
     Handle native Anthropic web_search (Path A).
     
-    This function bypasses /generateAssistantResponse entirely.
-    Direct MCP API call → SSE emulation → return to client.
+    This function bypasses /generateAssistantResponse entirely and executes the
+    configured web search provider before emulating the client response.
     
     Args:
         request: FastAPI Request
@@ -700,10 +700,13 @@ async def handle_native_web_search(
         )
     
     logger.info(f"WebSearch query (Path A - native): {query}")
-    
-    # Call MCP API
-    tool_use_id, results = await call_kiro_mcp_api(query, auth_manager)
-    
+
+    # Import locally to avoid a module cycle: the provider router delegates
+    # Kiro searches back to call_kiro_mcp_api in this module.
+    from kiro.web_search_provider import call_web_search
+
+    tool_use_id, results = await call_web_search(query, auth_manager)
+
     if results is None:
         return JSONResponse(
             status_code=500,
@@ -711,7 +714,7 @@ async def handle_native_web_search(
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": "Web search failed. Please try again."
+                    "message": "Configured web search provider failed. Check gateway logs or select another WEB_SEARCH_PROVIDER."
                 }
             }
         )

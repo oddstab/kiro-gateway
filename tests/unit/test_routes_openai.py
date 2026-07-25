@@ -397,30 +397,305 @@ class TestModelsEndpoint:
 
         for model in native_models:
             options = model["reasoningEfforts"]
+            # Strongest first: the client renders the picker in list order.
             assert [option["id"] for option in options] == [
-                "none",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
                 "max",
+                "xhigh",
+                "high",
+                "medium",
+                "low",
+                "none",
             ]
             assert [option["label"] for option in options] == [
-                "None",
-                "Low",
-                "Medium",
-                "High",
-                "xHigh",
                 "Max",
+                "xHigh",
+                "High",
+                "Medium",
+                "Low",
+                "None",
             ]
+            # Kiro id -> Grok value rank pairing must survive the reordering.
             assert [option["value"] for option in options] == [
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
                 "xhigh",
+                "high",
+                "medium",
+                "low",
+                "minimal",
+                "none",
             ]
+
+
+class TestModelsEndpointReasoningCapabilityAdvertisement:
+    """
+    /v1/models must advertise exactly what the converters will honour.
+
+    Regression: claude-haiku-4.5 was advertised with supportsReasoningEffort=true
+    because capability was guessed from the model name. Grok Build then sent
+    reasoning_effort, the gateway sent additionalModelRequestFields, and AWS
+    replied 400 REQUEST_BODY_INVALID.
+    """
+
+    HAIKU_METADATA = {
+        "modelId": "claude-haiku-4.5",
+        "modelName": "Claude Haiku 4.5",
+        "tokenLimits": {"maxInputTokens": 200000},
+    }
+    OPUS_METADATA = {
+        "modelId": "claude-opus-4.8",
+        "additionalModelRequestFieldsSchema": {
+            "properties": {"output_config": {"type": "object"}}
+        },
+    }
+    GPT_METADATA = {
+        "modelId": "gpt-5.6-sol",
+        "additionalModelRequestFieldsSchema": {
+            "properties": {"reasoning": {"type": "object"}}
+        },
+    }
+
+    @staticmethod
+    def _auth_headers():
+        return {"Authorization": f"Bearer {PROXY_API_KEY}"}
+
+    def _client(self, metadata_by_model, account_system=False):
+        """Mount the real /v1/models route over a stubbed account manager."""
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(router)
+
+        resolver = MagicMock()
+        resolver.get_available_models.return_value = sorted(metadata_by_model)
+        account = MagicMock()
+        account.model_resolver = resolver
+
+        manager = MagicMock()
+        manager.get_first_account.return_value = account
+        manager.get_all_available_models.return_value = sorted(metadata_by_model)
+        manager.get_model_metadata.side_effect = metadata_by_model.get
+        manager.get_model_context_window.side_effect = lambda model_id: (
+            (metadata_by_model.get(model_id) or {})
+            .get("tokenLimits", {})
+            .get("maxInputTokens")
+        )
+        app.state.account_manager = manager
+        app.state.account_system = account_system
+        return TestClient(app)
+
+    def _entries(self, metadata_by_model, account_system=False):
+        with self._client(metadata_by_model, account_system) as client:
+            response = client.get("/v1/models", headers=self._auth_headers())
+        assert response.status_code == 200
+        return {model["id"]: model for model in response.json()["data"]}
+
+    def test_haiku_without_schema_is_not_effort_capable(self):
+        """
+        What it does: Lists Haiku whose AWS metadata has no schema.
+        Purpose: The UI must not offer effort levels the API rejects.
+        """
+        entries = self._entries({"claude-haiku-4.5": self.HAIKU_METADATA})
+
+        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
+        assert entries["claude-haiku-4.5"]["reasoningEfforts"] == []
+
+    def test_supported_models_keep_effort_metadata(self):
+        """
+        What it does: Lists Haiku alongside two schema-backed models.
+        Purpose: Fail-closed must not strip effort from real capable models.
+        """
+        entries = self._entries(
+            {
+                "claude-haiku-4.5": self.HAIKU_METADATA,
+                "claude-opus-4.8": self.OPUS_METADATA,
+                "gpt-5.6-sol": self.GPT_METADATA,
+            }
+        )
+
+        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
+        for model_id in ("claude-opus-4.8", "gpt-5.6-sol"):
+            assert entries[model_id]["supportsReasoningEffort"] is True
+            assert len(entries[model_id]["reasoningEfforts"]) == 6
+
+    def test_effort_options_are_ordered_strongest_first(self):
+        """
+        What it does: Reads the serialized reasoningEfforts array straight off a
+                      real /v1/models response for schema-backed models.
+        Purpose: The client renders the picker in list order, so the advertised
+                 order must be strictly Max -> None. Asserted as whole lists so a
+                 single swapped entry fails, and per-entry so the Kiro id -> Grok
+                 value rank pairing cannot silently shift with the reordering.
+        """
+        entries = self._entries(
+            {
+                "claude-haiku-4.5": self.HAIKU_METADATA,
+                "claude-opus-4.8": self.OPUS_METADATA,
+                "gpt-5.6-sol": self.GPT_METADATA,
+            }
+        )
+
+        expected = [
+            ("max", "xhigh", "Max"),
+            ("xhigh", "high", "xHigh"),
+            ("high", "medium", "High"),
+            ("medium", "low", "Medium"),
+            ("low", "minimal", "Low"),
+            ("none", "none", "None"),
+        ]
+
+        for model_id in ("claude-opus-4.8", "gpt-5.6-sol"):
+            options = entries[model_id]["reasoningEfforts"]
+
+            assert [option["id"] for option in options] == [e[0] for e in expected]
+            assert [option["value"] for option in options] == [e[1] for e in expected]
+            assert [option["label"] for option in options] == [e[2] for e in expected]
+            # Pairings travel together: id/value/label of each row must match.
+            assert [
+                (option["id"], option["value"], option["label"]) for option in options
+            ] == expected
+
+        # Unsupported model advertises nothing at all, in any order.
+        assert entries["claude-haiku-4.5"]["reasoningEfforts"] == []
+
+    def test_effort_options_constant_is_not_runtime_sorted(self):
+        """
+        What it does: Compares the served order with the module constant order.
+        Purpose: The literal constant is the source of order; nothing may sort or
+                 reverse it on the way out.
+        """
+        from kiro.routes_openai import KIRO_REASONING_EFFORT_OPTIONS
+
+        entries = self._entries({"claude-opus-4.8": self.OPUS_METADATA})
+        served_ids = [
+            option["id"] for option in entries["claude-opus-4.8"]["reasoningEfforts"]
+        ]
+
+        assert served_ids == [option.id for option in KIRO_REASONING_EFFORT_OPTIONS]
+
+    def test_account_system_mode_uses_same_capability_source(self):
+        """
+        What it does: Repeats the check with the account system enabled.
+        Purpose: Both /v1/models code paths must read model metadata.
+        """
+        entries = self._entries(
+            {
+                "claude-haiku-4.5": self.HAIKU_METADATA,
+                "claude-opus-4.8": self.OPUS_METADATA,
+            },
+            account_system=True,
+        )
+
+        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
+        assert entries["claude-opus-4.8"]["supportsReasoningEffort"] is True
+
+    def test_models_without_metadata_use_static_whitelist(self):
+        """
+        What it does: Lists models when no metadata is available (offline mode).
+        Purpose: FALLBACK_MODELS must rely on the explicit whitelist only, and
+                 Haiku is deliberately absent from it.
+        """
+        entries = self._entries(
+            {"claude-haiku-4.5": None, "claude-opus-4.8": None, "deepseek-3.2": None}
+        )
+
+        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
+        assert entries["deepseek-3.2"]["supportsReasoningEffort"] is False
+        assert entries["claude-opus-4.8"]["supportsReasoningEffort"] is True
+
+    def test_alias_inherits_target_capability(self):
+        """
+        What it does: Advertises aliases whose metadata comes from their targets.
+        Purpose: Aliases never appear in the Kiro cache under their own name, so
+                 they must be judged by the resolved target's metadata.
+        """
+        entries = self._entries(
+            {
+                "my-opus": self.OPUS_METADATA,
+                "my-haiku": self.HAIKU_METADATA,
+            }
+        )
+
+        assert entries["my-opus"]["supportsReasoningEffort"] is True
+        assert entries["my-haiku"]["supportsReasoningEffort"] is False
+
+    def test_alias_inherits_target_capability_offline(self):
+        """
+        What it does: Same alias check with static (schema-less) metadata.
+        Purpose: Offline mode resolves the whitelist against the target id.
+        """
+        from kiro.model_capabilities import MODEL_SOURCE_KEY, MODEL_SOURCE_STATIC
+
+        entries = self._entries(
+            {
+                "my-opus": {
+                    "modelId": "claude-opus-4.8",
+                    MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
+                },
+                "my-haiku": {
+                    "modelId": "claude-haiku-4.5",
+                    MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
+                },
+            }
+        )
+
+        assert entries["my-opus"]["supportsReasoningEffort"] is True
+        assert entries["my-haiku"]["supportsReasoningEffort"] is False
+
+    def test_advertisement_matches_converter_payload(self):
+        """
+        What it does: Compares the advertised flag with what build_kiro_payload
+                      actually sends for the same model and metadata.
+        Purpose: This is the anti-drift check - UI truth and runtime truth are
+                 the same function, so they can never disagree.
+        """
+        from kiro.converters_openai import build_kiro_payload
+        from kiro.models_openai import ChatCompletionRequest, ChatMessage
+
+        metadata_by_model = {
+            "claude-haiku-4.5": self.HAIKU_METADATA,
+            "claude-opus-4.8": self.OPUS_METADATA,
+            "gpt-5.6-sol": self.GPT_METADATA,
+        }
+        entries = self._entries(metadata_by_model)
+
+        for model_id, model_info in metadata_by_model.items():
+            request = ChatCompletionRequest(
+                model=model_id,
+                messages=[ChatMessage(role="user", content="Solve this")],
+                reasoning_effort="high",
+            )
+            payload = build_kiro_payload(request, "conv", "", model_info)
+            sends_native_fields = "additionalModelRequestFields" in payload
+
+            assert entries[model_id]["supportsReasoningEffort"] is sends_native_fields, (
+                f"/v1/models and converter disagree for {model_id}"
+            )
+
+    def test_missing_metadata_helper_does_not_break_endpoint(self):
+        """
+        What it does: Uses an account manager without get_model_metadata.
+        Purpose: Legacy/stubbed managers must still serve the list, falling back
+                 to the conservative whitelist decision.
+        """
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(router)
+
+        resolver = MagicMock()
+        resolver.get_available_models.return_value = ["claude-haiku-4.5"]
+        account = MagicMock()
+        account.model_resolver = resolver
+        manager = Mock(spec=["get_first_account"])
+        manager.get_first_account.return_value = account
+        app.state.account_manager = manager
+        app.state.account_system = False
+
+        with TestClient(app) as client:
+            response = client.get("/v1/models", headers=self._auth_headers())
+
+        assert response.status_code == 200
+        entries = {model["id"]: model for model in response.json()["data"]}
+        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
 
 
 # =============================================================================

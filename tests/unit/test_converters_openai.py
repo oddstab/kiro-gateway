@@ -9,6 +9,8 @@ Tests for OpenAI-specific conversion logic:
 - Building Kiro payload from OpenAI requests
 """
 
+import json
+
 import pytest
 from unittest.mock import patch
 
@@ -2040,3 +2042,163 @@ class TestNativeReasoningPayloads:
         assert "additionalModelRequestFields" not in payload
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestOpenAIUnsupportedNativeReasoningModels:
+    """
+    Models whose AWS metadata does not advertise native reasoning must never
+    receive additionalModelRequestFields, even when the client insists.
+
+    Regression: claude-haiku-4.5 got Claude-style fields purely because its name
+    contains "claude", and AWS answered 400 "additionalModelRequestFields is not
+    supported for this model (REQUEST_BODY_INVALID)".
+    """
+
+    HAIKU_METADATA = {
+        "modelId": "claude-haiku-4.5",
+        "modelName": "Claude Haiku 4.5",
+        "tokenLimits": {"maxInputTokens": 200000},
+    }
+
+    def _haiku_request(self, **overrides):
+        kwargs = dict(
+            model="claude-haiku-4.5",
+            messages=[ChatMessage(role="user", content="Solve this")],
+        )
+        kwargs.update(overrides)
+        return ChatCompletionRequest(**kwargs)
+
+    def test_reasoning_effort_falls_back_to_fake_reasoning(self):
+        """
+        What it does: Sends reasoning_effort to Haiku with schema-less metadata.
+        Purpose: No native fields; prompt fallback covers the request instead.
+        """
+        request = self._haiku_request(reasoning_effort="high", max_tokens=4096)
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(
+                request, "conv-haiku", "", self.HAIKU_METADATA
+            )
+
+        assert "additionalModelRequestFields" not in payload
+        assert "agentMode" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" in content
+
+    def test_no_injection_when_fake_reasoning_disabled(self):
+        """
+        What it does: Same request with FAKE_REASONING disabled.
+        Purpose: Neither native fields nor prompt tags - a clean plain request.
+        """
+        request = self._haiku_request(reasoning_effort="high", max_tokens=4096)
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+            payload = build_kiro_payload(
+                request, "conv-haiku", "", self.HAIKU_METADATA
+            )
+
+        assert "additionalModelRequestFields" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+        assert "<max_thinking_length>" not in content
+        assert content.endswith("Solve this")
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"reasoning_effort": "xhigh"},
+            {"thinking": {"type": "adaptive"}},
+            {"output_config": {"effort": "max"}},
+            {"reasoning": {"effort": "max"}},
+            {
+                "reasoning_effort": "medium",
+                "thinking": {"type": "enabled", "budget_tokens": 2048},
+                "output_config": {"effort": "high"},
+                "reasoning": {"mode": "standard"},
+            },
+        ],
+    )
+    def test_every_reasoning_entry_point_is_blocked(self, overrides):
+        """
+        What it does: Tries each client field that can request reasoning.
+        Purpose: A single unguarded field would reintroduce the AWS 400.
+        """
+        request = self._haiku_request(**overrides)
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(
+                request, "conv-haiku", "", self.HAIKU_METADATA
+            )
+
+        assert "additionalModelRequestFields" not in payload
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            None,
+            {},
+            {"properties": {}},
+            {"properties": {"thinking": {}}},
+            "not-json",
+            '{"properties": {"output_config": {}}',
+        ],
+    )
+    def test_unusable_metadata_schema_blocks_native_fields(self, schema):
+        """
+        What it does: Supplies malformed/irrelevant schemas for a Claude model.
+        Purpose: Fail closed on every broken-metadata shape.
+        """
+        model_info = dict(self.HAIKU_METADATA)
+        model_info["additionalModelRequestFieldsSchema"] = schema
+        request = self._haiku_request(reasoning_effort="high")
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(request, "conv-haiku", "", model_info)
+
+        assert "additionalModelRequestFields" not in payload
+
+    def test_missing_metadata_also_blocks_haiku(self):
+        """
+        What it does: Requests Haiku reasoning with no metadata at all.
+        Purpose: Offline FALLBACK_MODELS mode must not whitelist Haiku either.
+        """
+        request = self._haiku_request(reasoning_effort="high")
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(request, "conv-haiku", "")
+
+        assert "additionalModelRequestFields" not in payload
+
+    def test_json_string_schema_still_enables_native_fields(self):
+        """
+        What it does: Supplies the AWS schema as a JSON string.
+        Purpose: Fail-closed must not break the legitimate string encoding.
+        """
+        model_info = dict(self.HAIKU_METADATA)
+        model_info["additionalModelRequestFieldsSchema"] = json.dumps(
+            {"properties": {"output_config": {"type": "object"}}}
+        )
+        request = self._haiku_request(reasoning_effort="high")
+
+        payload = build_kiro_payload(request, "conv-haiku", "", model_info)
+
+        assert payload["additionalModelRequestFields"] == {
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "xhigh"},
+        }
+
+    def test_disabled_reasoning_stays_disabled(self):
+        """
+        What it does: Sends reasoning_effort="none" to Haiku.
+        Purpose: Explicit opt-out keeps producing no reasoning of any kind.
+        """
+        request = self._haiku_request(reasoning_effort="none")
+
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = build_kiro_payload(
+                request, "conv-haiku", "", self.HAIKU_METADATA
+            )
+
+        assert "additionalModelRequestFields" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content

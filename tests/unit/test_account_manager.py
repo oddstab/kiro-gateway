@@ -28,6 +28,12 @@ from kiro.account_manager import (
 from kiro.account_errors import ErrorType
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
+from kiro.model_capabilities import (
+    MODEL_SOURCE_DYNAMIC,
+    MODEL_SOURCE_KEY,
+    MODEL_SOURCE_STATIC,
+    resolve_native_reasoning_format,
+)
 from kiro.model_resolver import ModelResolver
 
 
@@ -1272,6 +1278,130 @@ class TestAccountManagerGetAllAvailableModels:
         assert len(models) > 0
         assert isinstance(models, list)
         assert all(isinstance(m, str) for m in models)
+
+
+class TestAccountManagerGetModelMetadata:
+    """
+    Tests for AccountManager.get_model_metadata().
+
+    /v1/models advertises capabilities from this metadata, so it must resolve
+    the same entry the converters receive - including for aliases, which never
+    appear in the Kiro cache under their own name.
+    """
+
+    @staticmethod
+    async def _manager_with_cache(models, aliases=None, source=MODEL_SOURCE_DYNAMIC):
+        """Build a bare AccountManager backed by one in-memory cache."""
+        cache = ModelInfoCache()
+        await cache.update(models, source=source)
+        resolver = ModelResolver(cache=cache, hidden_models={}, aliases=aliases or {})
+
+        account = Account(id="acct", auth_manager=MagicMock())
+        account.model_cache = cache
+        account.model_resolver = resolver
+
+        manager = AccountManager.__new__(AccountManager)
+        manager._accounts = {"acct": account}
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_returns_metadata_for_direct_model_id(self):
+        """
+        What it does: Looks up a model by its exact cache key.
+        Purpose: Baseline - the advertised id usually is the Kiro id.
+        """
+        manager = await self._manager_with_cache(
+            [{"modelId": "claude-haiku-4.5", "tokenLimits": {"maxInputTokens": 200000}}]
+        )
+
+        metadata = manager.get_model_metadata("claude-haiku-4.5")
+
+        assert metadata is not None
+        assert metadata["modelId"] == "claude-haiku-4.5"
+
+    @pytest.mark.asyncio
+    async def test_alias_inherits_target_metadata(self):
+        """
+        What it does: Looks up a MODEL_ALIASES key with no cache entry.
+        Purpose: An alias must inherit the target's AWS capability metadata, not
+                 be judged by its own display name.
+        """
+        schema = {"properties": {"output_config": {}}}
+        manager = await self._manager_with_cache(
+            [{"modelId": "claude-opus-4.6", "additionalModelRequestFieldsSchema": schema}],
+            aliases={"my-opus": "claude-opus-4.6[1m]"},
+        )
+
+        metadata = manager.get_model_metadata("my-opus")
+
+        assert metadata is not None
+        assert metadata["modelId"] == "claude-opus-4.6"
+        assert resolve_native_reasoning_format("my-opus", metadata) == "output_config"
+
+    @pytest.mark.asyncio
+    async def test_alias_to_unsupported_target_inherits_no_capability(self):
+        """
+        What it does: Points an alias at Haiku, which has no AWS schema.
+        Purpose: Aliases must not upgrade an unsupported target.
+        """
+        manager = await self._manager_with_cache(
+            [{"modelId": "claude-haiku-4.5", "tokenLimits": {"maxInputTokens": 200000}}],
+            aliases={"my-haiku": "claude-haiku-4-5"},
+        )
+
+        metadata = manager.get_model_metadata("my-haiku")
+
+        assert metadata["modelId"] == "claude-haiku-4.5"
+        assert resolve_native_reasoning_format("my-haiku", metadata) is None
+
+    @pytest.mark.asyncio
+    async def test_client_name_format_still_resolves(self):
+        """
+        What it does: Looks up a dashed client spelling of a cached model.
+        Purpose: Normalization must happen before the metadata lookup.
+        """
+        manager = await self._manager_with_cache([{"modelId": "claude-opus-4.8"}])
+
+        assert manager.get_model_metadata("claude-opus-4-8")["modelId"] == "claude-opus-4.8"
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_returns_none(self):
+        """
+        What it does: Looks up a model no account knows about.
+        Purpose: Missing metadata must be None so capability fails closed.
+        """
+        manager = await self._manager_with_cache([{"modelId": "claude-opus-4.8"}])
+
+        assert manager.get_model_metadata("totally-unknown") is None
+
+    @pytest.mark.asyncio
+    async def test_static_source_is_preserved_in_metadata(self):
+        """
+        What it does: Reads metadata from a cache filled with FALLBACK_MODELS.
+        Purpose: Offline entries must stay tagged static so /v1/models applies
+                 the whitelist instead of trusting an absent schema.
+        """
+        manager = await self._manager_with_cache(
+            [{"modelId": "claude-haiku-4.5"}], source=MODEL_SOURCE_STATIC
+        )
+
+        metadata = manager.get_model_metadata("claude-haiku-4.5")
+
+        assert metadata[MODEL_SOURCE_KEY] == MODEL_SOURCE_STATIC
+        assert resolve_native_reasoning_format("claude-haiku-4.5", metadata) is None
+
+    @pytest.mark.asyncio
+    async def test_uninitialized_accounts_are_skipped(self):
+        """
+        What it does: Queries a manager whose account has no cache yet.
+        Purpose: Lazy initialization must not raise during /v1/models.
+        """
+        account = Account(id="acct")
+        manager = AccountManager.__new__(AccountManager)
+        manager._accounts = {"acct": account}
+
+        assert manager.get_model_metadata("claude-opus-4.8") is None
+        assert manager.get_model_context_window("claude-opus-4.8") is None
 
 
 class TestFormatDuration:

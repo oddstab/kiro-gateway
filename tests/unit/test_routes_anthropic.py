@@ -2063,7 +2063,89 @@ class TestMessagesLegacyMode:
 
 class TestMessagesNativeWebSearchAccountSelection:
     """Tests for native WebSearch account selection in /v1/messages endpoint."""
-    
+
+    @staticmethod
+    def _native_search_request():
+        """Build a valid Anthropic native web-search request."""
+        return {
+            "model": "claude-sonnet-4.5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "current news"}],
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": 8,
+                }
+            ],
+        }
+
+    def test_duckduckgo_mode_skips_kiro_account_selection(self, monkeypatch):
+        """Native Anthropic search must work without a Kiro account in DDG mode."""
+        from fastapi import FastAPI
+        from fastapi.responses import JSONResponse
+
+        import kiro.routes_anthropic as routes_anthropic
+
+        handler = AsyncMock(return_value=JSONResponse({"provider": "duckduckgo"}))
+        monkeypatch.setattr(
+            routes_anthropic,
+            "web_search_requires_kiro_auth",
+            lambda: False,
+        )
+        monkeypatch.setattr(routes_anthropic, "handle_native_web_search", handler)
+
+        app = FastAPI()
+        app.include_router(routes_anthropic.router)
+        manager = MagicMock()
+        app.state.account_manager = manager
+        app.state.account_system = False
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/messages",
+                headers={"x-api-key": PROXY_API_KEY},
+                json=self._native_search_request(),
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {"provider": "duckduckgo"}
+        manager.get_first_account.assert_not_called()
+        assert handler.await_args.args[2] is None
+        assert handler.await_args.kwargs["api_format"] == "anthropic"
+
+    def test_kiro_mode_without_account_returns_503(self, monkeypatch):
+        """Native Anthropic Kiro search must require an initialized account."""
+        from fastapi import FastAPI
+
+        import kiro.routes_anthropic as routes_anthropic
+
+        handler = AsyncMock()
+        monkeypatch.setattr(
+            routes_anthropic,
+            "web_search_requires_kiro_auth",
+            lambda: True,
+        )
+        monkeypatch.setattr(routes_anthropic, "handle_native_web_search", handler)
+
+        app = FastAPI()
+        app.include_router(routes_anthropic.router)
+        manager = MagicMock()
+        manager.get_first_account.return_value = None
+        app.state.account_manager = manager
+        app.state.account_system = False
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/messages",
+                headers={"x-api-key": PROXY_API_KEY},
+                json=self._native_search_request(),
+            )
+
+        assert response.status_code == 503
+        assert "Kiro web search" in response.json()["error"]["message"]
+        handler.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_messages_native_websearch_get_first_account(self):
         """
