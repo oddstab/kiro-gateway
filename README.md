@@ -542,6 +542,34 @@ cc() {
 }
 ```
 
+#### 讓 Claude Code 使用 Gateway 的 DDG 搜尋
+
+Claude Code 有自己的內建 `WebSearch`。若要**保證網頁搜尋由 Gateway 的
+DuckDuckGo provider 執行**，請完成以下設定：
+
+1. 在 Gateway 的 `.env` 設定：
+
+   ```env
+   WEB_SEARCH_ENABLED=true
+   WEB_SEARCH_PROVIDER=ddg
+   ```
+
+   `ddg`、`duckduckgo`、`duckgo` 是完全等價的別名，都會使用同一個
+   DuckDuckGo backend。
+2. 重啟 Gateway，讓新的 `.env` 生效。
+3. 啟動 Claude Code 時停用它自己的搜尋工具：
+
+   ```powershell
+   cc --disallowedTools WebSearch
+   ```
+
+   Linux/macOS 也使用相同參數：`cc --disallowedTools WebSearch`。若希望永久套用，
+   可將 `--disallowedTools WebSearch` 加到上面的 `claude` wrapper 命令中。
+
+停用內建 `WebSearch` 後，Gateway 會注入自己的 `web_search` 工具，並依
+`WEB_SEARCH_PROVIDER` 執行搜尋；若未停用，Claude Code 仍可能自行搜尋，該次搜尋
+就不受 Gateway 的 provider 設定控制。
+
 ### Grok Build
 
 #### 步驟 1：把 Grok Build 指向閘道器
@@ -591,17 +619,17 @@ context_window = 1000000
 區塊取得 `base_url`，再直接呼叫 `POST /v1/responses`；因此不需要任何額外的
 Gateway alias 環境變數。
 
-搜尋後端由 Gateway 的 `.env` 控制：
+#### 步驟 3：選擇 DDG 搜尋後端
+
+在 Gateway 的 `.env` 設定：
 
 ```env
-# Kiro 原生 MCP 搜尋（預設，需要可用的 Kiro 帳號）
-WEB_SEARCH_PROVIDER=kiro
-
-# 或改用 DuckDuckGo（也接受 ddg / duckgo）
-WEB_SEARCH_PROVIDER=duckduckgo
+WEB_SEARCH_PROVIDER=ddg
 ```
 
-重啟閘道器與 Grok Build 後即可使用。Gateway 會以 OpenAI Responses API 格式（含 `url_citation` 引用）回傳。
+`ddg`、`duckduckgo`、`duckgo` 三種寫法完全相同；若要切回 Kiro MCP，改成
+`WEB_SEARCH_PROVIDER=kiro`。修改後重啟 Gateway，並重新啟動 Grok Build。
+Gateway 會以 OpenAI Responses API 格式（含 `url_citation` 引用）回傳結果。
 
 > **不需要 `--disable-web-search`。** 若設定正確，閘道器日誌會出現：
 >
