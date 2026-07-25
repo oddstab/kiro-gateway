@@ -542,6 +542,21 @@ cc() {
 }
 ```
 
+#### Claude Code で Gateway の DDG 検索を使用する
+
+Claude Code には独自の `WebSearch` があります。検索を必ず Gateway の
+DuckDuckGo provider で実行するには、Gateway の `.env` に以下を設定します：
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=ddg
+```
+
+`ddg`、`duckduckgo`、`duckgo` は同じ別名です。Gateway を再起動した後、
+`cc --disallowedTools WebSearch` で Claude Code 内蔵検索を無効にしてください。
+無効にしない場合、Claude Code が自身で検索し、`WEB_SEARCH_PROVIDER` の対象外に
+なることがあります。
+
 ### Grok Build
 
 Grok Build をこのゲートウェイに接続し、`/v1/models` に表示される実際の Kiro
@@ -559,8 +574,8 @@ function gg {
 ウェブ検索には `models.web_search = "kiro-search-proxy"` と、
 `http://localhost:8000/v1` を指す `[model.kiro-search-proxy]` エントリを
 `api_backend = "responses"` で設定してください。この proxy id はチャットモデルとして公開されません。
-検索バックエンドはゲートウェイの `.env` で `WEB_SEARCH_PROVIDER=kiro`（デフォルトの Kiro MCP）
-または `WEB_SEARCH_PROVIDER=duckduckgo`（`ddg`、`duckgo` も可）を選択します。
+DuckDuckGo を使うには Gateway の `.env` に `WEB_SEARCH_PROVIDER=ddg` を設定します。
+`duckduckgo` と `duckgo` も同じ別名です。変更後に Gateway と Grok Build を再起動してください。
 
 **Linux/macOS:**
 ```bash

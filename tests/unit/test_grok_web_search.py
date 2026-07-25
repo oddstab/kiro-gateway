@@ -723,6 +723,30 @@ class TestGrokBuildConfigTomlContract:
         assert entry is not None
         assert entry["base_url"] == "http://localhost:8000/v1"
 
+    @pytest.mark.parametrize(
+        "readme_path",
+        [
+            "README.md",
+            "docs/en/README.md",
+            "docs/ja/README.md",
+            "docs/ko/README.md",
+        ],
+    )
+    def test_readmes_document_ddg_for_claude_code_and_grok_build(
+        self,
+        readme_path,
+    ):
+        """Every README must explain how both clients reach Gateway DDG."""
+        from pathlib import Path
+
+        text = Path(readme_path).read_text(encoding="utf-8")
+
+        assert "WEB_SEARCH_PROVIDER=ddg" in text
+        assert "--disallowedTools WebSearch" in text
+        assert 'web_search = "kiro-search-proxy"' in text
+        assert "duckduckgo" in text
+        assert "duckgo" in text
+
 
 class TestAliasContextWindowInheritance:
     """Alias ids are absent from the Kiro cache, so they must resolve first."""
