@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -722,7 +722,7 @@ def print_startup_banner(host: str, port: int) -> None:
     print()
     print(f"  {DIM}{'─' * 48}{RESET}")
     print(f"  {WHITE}💬 Found a bug? Need help? Have questions?{RESET}")
-    print(f"  {YELLOW}➜  https://github.com/jwadow/kiro-gateway/issues{RESET}")
+    print(f"  {YELLOW}➜  https://github.com/oddstab/kiro-gateway/issues{RESET}")
     print(f"  {DIM}{'─' * 48}{RESET}")
     print()
 

@@ -68,9 +68,9 @@ All contributors must sign the Contributor License Agreement (automated via bot)
 
 ## Questions?
 
-- **Bug reports:** [Open an issue](https://github.com/jwadow/kiro-gateway/issues)
+- **Bug reports:** [Open an issue](https://github.com/oddstab/kiro-gateway/issues)
 - **Feature ideas:** Discuss in an issue first
-- **Questions:** [Start a discussion](https://github.com/jwadow/kiro-gateway/discussions)
+- **Questions:** [Start a discussion](https://github.com/oddstab/kiro-gateway/discussions)
 
 ## Recognition
 
