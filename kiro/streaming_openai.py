@@ -44,6 +44,7 @@ from kiro.config import (
     FAKE_REASONING_HANDLING,
     WEB_SEARCH_ENABLED,
 )
+from kiro.mcp_tools import client_provides_web_search
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
 
 # Import from streaming_core - reuse shared parsing logic
@@ -246,14 +247,22 @@ async def stream_kiro_to_openai_internal(
                 # ==============================================================================
                 
                 # INTERCEPT web_search tool calls (Path B - MCP emulation).
-                # Only when WEB_SEARCH_ENABLED; otherwise let the tool call flow
-                # back to the client untouched. For Grok Build this is required:
-                # Grok Build executes web_search with its own client-side tool
-                # (which hits POST /v1/responses -> kiro/grok_web_search.py and
-                # returns native Responses-format results). Intercepting here
-                # would swallow the tool call and emit <web_search> tagged text
-                # instead, overriding Grok Build's native behavior.
-                if WEB_SEARCH_ENABLED and tool_name == "web_search":
+                #
+                # Two conditions must hold:
+                #  - WEB_SEARCH_ENABLED, and
+                #  - the CLIENT did not send its own web_search tool.
+                #
+                # The second condition is what keeps raw tags out of Grok Build:
+                # it executes web_search itself (POST /v1/responses ->
+                # kiro/grok_web_search.py). If we intercepted its tool call we
+                # would swallow it and answer with `<web_search>` tagged text,
+                # which the client renders verbatim in the chat window.
+                # Otherwise the call flows back untouched and the client runs it.
+                if (
+                    WEB_SEARCH_ENABLED
+                    and tool_name == "web_search"
+                    and not client_provides_web_search(request_tools)
+                ):
                     from kiro.mcp_tools import call_kiro_mcp_api, generate_search_summary
                     from kiro.web_search_duckduckgo import call_duckduckgo
 

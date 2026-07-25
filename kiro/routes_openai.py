@@ -55,7 +55,11 @@ from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search, call_kiro_mcp_api
+from kiro.mcp_tools import (
+    handle_native_web_search,
+    call_kiro_mcp_api,
+    client_provides_web_search,
+)
 from kiro.grok_web_search import (
     is_grok_web_search_request,
     extract_query_from_responses_input,
@@ -405,8 +409,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
     
-    # Auto-inject web_search tool if enabled (Path B - MCP emulation)
-    if WEB_SEARCH_ENABLED:
+    # Auto-inject web_search tool if enabled (Path B - MCP emulation).
+    #
+    # Skipped when the client already ships its own web search capability.
+    # Grok Build is the motivating case: it runs web_search client-side against
+    # POST /v1/responses (kiro/grok_web_search.py). Injecting a second,
+    # same-named tool made the model call OUR tool, which Path B then
+    # intercepted and answered with `<web_search>` tagged text -- the raw tags
+    # users saw in chat. Let the client's own tool win instead.
+    client_has_web_search = client_provides_web_search(request_data.tools)
+    if client_has_web_search:
+        logger.debug(
+            "Client provides its own web_search tool - skipping auto-injection "
+            "and Path B interception"
+        )
+
+    if WEB_SEARCH_ENABLED and not client_has_web_search:
         if request_data.tools is None:
             request_data.tools = []
         

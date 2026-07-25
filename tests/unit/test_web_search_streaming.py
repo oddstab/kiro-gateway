@@ -120,3 +120,158 @@ async def test_openai_stream_unclosed_unparseable_no_leak():
 
     assert "<web_search>" not in blob
     assert "</web_search>" not in blob
+
+
+# ==================================================================================================
+# Path B 攔截 vs. 客戶端自帶 web_search
+#
+# 這是使用者截圖裡標籤外洩的真正來源。閘道器會自動注入一個 web_search 工具，
+# 模型呼叫它，Path B 再攔截並把 generate_search_summary() 的「帶標籤」文字直接
+# 塞進回應內容 —— 那段文字是在 WebSearchParser 之後才注入的，所以 parser 完全
+# 攔不到。Grok Build 本身就有 client-side web_search（打 POST /v1/responses），
+# 因此閘道器必須讓路。
+#
+# 這些測試驅動真正的 generator，只替換搜尋後端。
+# ==================================================================================================
+
+# Grok Build 送出的形態：web_search 是它的 client-side function tool 之一
+GROK_BUILD_TOOLS = [
+    {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+    {"type": "function", "function": {"name": "web_search", "parameters": {}}},
+]
+ANTHROPIC_CLIENT_TOOLS = [
+    {"name": "read_file", "input_schema": {}},
+    {"name": "web_search", "input_schema": {}},
+]
+
+BACKEND_RESULTS = {
+    "results": [
+        {
+            "title": "LEY DE CONCURSOS Y QUIEBRAS",
+            "url": "https://servicios.infoleg.gob.ar/x",
+            "snippet": "Sancionada: Julio 20 de 1995.",
+            "publishedDate": 1548115200000,
+        }
+    ],
+    "totalResults": 1,
+}
+
+
+def _make_tool_call_bytes(query: str) -> list:
+    """造出上游的 web_search tool call 事件 byte（Path B 的觸發來源）。
+
+    AwsEventStreamParser 靠掃描 `{"name":...}` / `{"stop":...}` 抓 tool call
+    （見 kiro/parsers.py EVENT_PATTERNS），這裡直接產生那兩個 frame。
+    """
+    return [
+        json.dumps(
+            {"name": "web_search", "toolUseId": "tooluse_x", "input": {"query": query}}
+        ).encode("utf-8"),
+        json.dumps({"stop": True}).encode("utf-8"),
+    ]
+
+
+@pytest.fixture
+def fake_search_backend(monkeypatch):
+    """把兩個搜尋後端換掉，其餘流程全部走真實程式碼。"""
+    async def _fake_mcp(query, auth_manager=None):
+        return "srvtoolu_x", BACKEND_RESULTS
+
+    async def _fake_ddg(query, max_results: int = 10):
+        return "srvtoolu_x", BACKEND_RESULTS
+
+    monkeypatch.setattr("kiro.mcp_tools.call_kiro_mcp_api", _fake_mcp)
+    monkeypatch.setattr("kiro.web_search_duckduckgo.call_duckduckgo", _fake_ddg)
+
+
+@pytest.mark.asyncio
+async def test_openai_client_web_search_tool_is_not_hijacked(fake_search_backend):
+    """OpenAI：客戶端自帶 web_search 時，不攔截、不洩漏標籤、原樣傳回 tool call。
+
+    這條就是使用者截圖的回歸測試。
+    """
+    out = []
+    async for chunk in stream_kiro_to_openai_internal(
+        AsyncMock(), _fake_response(_make_tool_call_bytes("LCQ 是什麼 縮寫")),
+        "grok-4.20-multi-agent", _mock_cache(), MagicMock(),
+        request_tools=GROK_BUILD_TOOLS,
+    ):
+        out.append(chunk)
+    blob = "".join(out)
+
+    # 零標籤外洩
+    assert "<web_search>" not in blob
+    assert "</web_search>" not in blob
+    # 閘道器沒有自己去搜尋
+    assert "LEY DE CONCURSOS" not in blob
+    # tool call 原樣傳回，交給 Grok Build 自己執行（POST /v1/responses）
+    assert "tool_calls" in blob
+    assert "web_search" in blob
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_web_search_tool_is_not_hijacked(fake_search_backend):
+    """Anthropic：與 OpenAI 路徑行為一致（專案要求兩個 API 對齊）。"""
+    out = []
+    async for chunk in stream_kiro_to_anthropic(
+        _fake_response(_make_tool_call_bytes("LCQ")), "claude-opus-4.6",
+        _mock_cache(), MagicMock(), request_tools=ANTHROPIC_CLIENT_TOOLS,
+    ):
+        out.append(chunk)
+    blob = "".join(out)
+
+    assert "<web_search>" not in blob
+    assert "</web_search>" not in blob
+    assert "LEY DE CONCURSOS" not in blob
+    assert "tool_use" in blob
+    assert "web_search" in blob
+
+
+@pytest.mark.asyncio
+async def test_openai_path_b_still_intercepts_without_client_tool(fake_search_backend):
+    """OpenAI：客戶端沒帶 web_search 時，Path B 仍照舊攔截（維持相容）。
+
+    這些客戶端沒有自己的搜尋能力，靠閘道器代跑，所以不能一併關掉。
+    """
+    out = []
+    async for chunk in stream_kiro_to_openai_internal(
+        AsyncMock(), _fake_response(_make_tool_call_bytes("LCQ")),
+        "claude-opus-4.6", _mock_cache(), MagicMock(),
+        request_tools=[{"type": "function", "function": {"name": "read_file"}}],
+    ):
+        out.append(chunk)
+    blob = "".join(out)
+
+    assert "LEY DE CONCURSOS" in blob, "Path B 應該仍為無搜尋能力的客戶端代跑搜尋"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_path_b_still_intercepts_without_client_tool(
+    fake_search_backend,
+):
+    """Anthropic：客戶端沒帶 web_search 時同樣維持攔截行為。"""
+    out = []
+    async for chunk in stream_kiro_to_anthropic(
+        _fake_response(_make_tool_call_bytes("LCQ")), "claude-opus-4.6",
+        _mock_cache(), MagicMock(), request_tools=[{"name": "read_file"}],
+    ):
+        out.append(chunk)
+    blob = "".join(out)
+
+    assert "LEY DE CONCURSOS" in blob
+
+
+@pytest.mark.asyncio
+async def test_openai_native_web_search_tool_type_is_respected(fake_search_backend):
+    """OpenAI：原生 server-side 形態 {"type": "web_search"} 也算客戶端自帶。"""
+    out = []
+    async for chunk in stream_kiro_to_openai_internal(
+        AsyncMock(), _fake_response(_make_tool_call_bytes("LCQ")),
+        "grok-4.20-multi-agent", _mock_cache(), MagicMock(),
+        request_tools=[{"type": "web_search_20250305"}],
+    ):
+        out.append(chunk)
+    blob = "".join(out)
+
+    assert "<web_search>" not in blob
+    assert "LEY DE CONCURSOS" not in blob

@@ -268,12 +268,35 @@ HIDDEN_MODELS: Dict[str, str] = {
 #
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
 _GROK_TARGET = os.getenv("GROK_TARGET_MODEL", "claude-opus-4-6[1m]")
+
+# Grok Build's web_search tool resolves its own model before calling the
+# Responses API. `resolve_web_search_sampling_config()` (grok-build:
+# crates/codegen/xai-grok-shell/src/agent/config.rs) looks the model id up in
+# the model list served by /v1/models:
+#
+#   1. find_model_by_id(models, web_search_model) -> reuses THAT entry's
+#      base_url + api_key, so the search request lands on this gateway.
+#   2. Not found and id == default_web_search_model() -> falls back to
+#      `endpoints.resolve_inference_base_url()`, i.e. xAI's own endpoint.
+#      The gateway never sees the request, and Grok Build's web_search runs
+#      against upstream (or fails), which is why raw <web_search> tagged text
+#      used to surface in chat instead of real search results.
+#
+# So the gateway MUST advertise this model id for path 1 to win. The default
+# matches grok-build's compiled-in default (`default_web_search_model()`, see
+# xai-grok-workspace/src/session/tool_config.rs); override it with
+# GROK_WEB_SEARCH_MODEL to match a customised Grok Build config.
+GROK_WEB_SEARCH_MODEL: str = os.getenv("GROK_WEB_SEARCH_MODEL", "grok-4.20-multi-agent")
+
 MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",
     "grok-4": _GROK_TARGET,
     "grok-4-fast": _GROK_TARGET,
     "grok-3": _GROK_TARGET,
     "grok-4.5": _GROK_TARGET,
+    # Advertised so Grok Build's web_search resolves to this gateway (path 1
+    # above). Chat requests for it still work: it maps to a real Kiro model.
+    GROK_WEB_SEARCH_MODEL: _GROK_TARGET,
 }
 
 # Models to hide from /v1/models endpoint.

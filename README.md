@@ -562,27 +562,98 @@ cc() {
 
 ### Grok Build
 
-設定環境變數將 Grok Build 指向本閘道器（透過 Grok 別名自動對應 Claude 模型）：
+#### 步驟 1：把 Grok Build 指向閘道器
+
+設定環境變數（透過 Grok 別名自動對應 Claude 模型）：
 
 ```powershell
 # PowerShell profile
 function gg {
     $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
     $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # 對應 .env 中的 PROXY_API_KEY
-    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+    & "$env:USERPROFILE\.grok\bin\grok.exe" @args
 }
 ```
-
-Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4-6[1m]`，可在 `.env` 中修改）。
 
 **Linux/macOS:**
 ```bash
 gg() {
     GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
     GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
-    grok --disable-web-search "$@"
+    grok "$@"
 }
 ```
+
+Grok Build 發出的 `grok-4` 等模型請求會自動對應到 `GROK_TARGET_MODEL`（預設 `claude-opus-4-6[1m]`，可在 `.env` 中修改）。
+
+#### 步驟 2：設定 web_search（想用網頁搜尋才需要）
+
+只做步驟 1 的話，聊天可以正常運作，但 `web_search` 工具**不會**經過閘道器。
+原因是 Grok Build 的 web_search 走的是獨立的解析路徑，`GROK_XAI_API_BASE_URL`
+對它無效（詳見下方原理說明）。
+
+在 `~/.grok/config.toml` 加入這兩段：
+
+```toml
+[models]
+web_search = "grok-4.20-multi-agent"
+
+# 鍵名務必加引號！id 含小數點，裸鍵會被 TOML 解析成巢狀表格
+# （model.grok-4 → "20-multi-agent"），Grok Build 就找不到這個模型，
+# 而且不會有任何錯誤訊息。
+[model."grok-4.20-multi-agent"]
+model = "grok-4.20-multi-agent"
+base_url = "http://localhost:8000/v1"   # 指向本閘道器
+env_key = "GROK_CODE_XAI_API_KEY"       # 沿用步驟 1 的 API key
+api_backend = "responses"
+context_window = 1000000
+```
+
+重啟閘道器與 Grok Build 後即可使用。搜尋結果由 Kiro 的 MCP web_search 提供，
+以 OpenAI Responses API 格式（含 `url_citation` 引用）回傳。
+
+> **不需要 `--disable-web-search`。** 舊版文件建議加這個參數，是因為當時
+> web_search 無法正常運作（會在畫面上吐出 `<web_search>` 標籤原文）。現在可以移除。
+
+**驗證是否生效**：閘道器日誌應出現這行
+
+```
+Grok Build web_search request (Responses API): query='...'
+```
+
+若沒有出現，代表請求跑去 xAI 官方端點了 —— 請檢查 `config.toml` 的表格鍵名有沒有加引號。
+
+#### 模型 id 不一致時
+
+預設值 `grok-4.20-multi-agent` 對應 Grok Build 內建的 `default_web_search_model()`。
+若你自訂了別的 id，兩邊都要改成一致：
+
+| 位置 | 設定 |
+|------|------|
+| 閘道器 | `.env` 的 `GROK_WEB_SEARCH_MODEL` |
+| Grok Build | `config.toml` 的 `[models].web_search` 與對應的 `[model."..."]` 區塊 |
+
+#### 原理：為什麼需要步驟 2
+
+Grok Build 的 `web_search` **不是**靠模型輸出 `<web_search>` 標籤再由閘道器解析，
+而是實際發出一個後端請求：`POST {base_url}/responses`。
+
+發送前它會先拿 `models.web_search` 這個 id 去模型清單裡查，決定要打哪個 base_url：
+
+| 情況 | 結果 |
+|------|------|
+| 在 `/v1/models` 中找到 | 沿用該模型的 `base_url` → 請求進入本閘道器 ✅ |
+| 找不到 | 退回 xAI 官方端點 → 閘道器收不到請求，搜尋失敗 ❌ |
+
+關鍵在於這個 fallback 只讀 `models_base_url` 與內建的 proxy 預設值，
+**不看 `GROK_XAI_API_BASE_URL`**。所以光設環境變數不夠，必須在 `config.toml`
+明確定義該模型，讓查找命中第一種情況。閘道器這一側也會在 `/v1/models`
+通告這個 id 來配合。
+
+另外，閘道器會偵測「客戶端自己帶了 `web_search` 工具」的情況（Grok Build 就是），
+此時不再注入同名工具、也不攔截該工具呼叫，直接把 tool call 原樣交還給客戶端執行。
+先前畫面上會出現 `<web_search>` 標籤原文，就是因為閘道器搶走了客戶端的工具呼叫，
+再把帶標籤的文字塞進回應內容。沒有自帶搜尋能力的客戶端行為不變，仍由閘道器代跑。
 
 ### 其他工具
 
@@ -601,6 +672,7 @@ gg() {
 | `/v1/models` | GET | 列出可用模型 |
 | `/v1/chat/completions` | POST | OpenAI Chat Completions API |
 | `/v1/messages` | POST | Anthropic Messages API |
+| `/v1/responses` | POST | OpenAI Responses API（供 Grok Build 的 `web_search` 使用） |
 
 ---
 

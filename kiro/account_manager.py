@@ -946,4 +946,21 @@ class AccountManager:
             # 只在 cache 實際含此模型時取值，避免用到 get_max_input_tokens 的預設 fallback
             if cache is not None and cache.is_valid_model(model_id):
                 return cache.get_max_input_tokens(model_id)
+
+        # Alias names (MODEL_ALIASES, e.g. grok-* and the Grok Build web_search
+        # model) never appear in the Kiro cache. Resolve to the real Kiro model
+        # first so the alias still reports a true context window instead of
+        # letting the client fall back to its built-in default.
+        for account in self._accounts.values():
+            resolver = getattr(account, "model_resolver", None)
+            cache = getattr(account, "model_cache", None)
+            if resolver is None or cache is None:
+                continue
+            try:
+                resolved = resolver.resolve(model_id).internal_id
+            except Exception as e:  # resolver raises on unknown/unsupported ids
+                logger.debug(f"Context window lookup: cannot resolve '{model_id}': {e}")
+                continue
+            if resolved != model_id and cache.is_valid_model(resolved):
+                return cache.get_max_input_tokens(resolved)
         return None

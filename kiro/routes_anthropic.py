@@ -55,7 +55,7 @@ from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.tokenizer import estimate_request_tokens
 from kiro.config import WEB_SEARCH_ENABLED
-from kiro.mcp_tools import handle_native_web_search
+from kiro.mcp_tools import handle_native_web_search, client_provides_web_search
 
 # Import debug_logger
 try:
@@ -253,8 +253,17 @@ async def messages(
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
     
-    # Auto-inject web_search tool if enabled (Path B - MCP emulation)
-    if WEB_SEARCH_ENABLED:
+    # Auto-inject web_search tool if enabled (Path B - MCP emulation).
+    #
+    # Skipped when the client already ships its own web search tool, so we never
+    # hand the model a duplicate that Path B would answer with `<web_search>`
+    # tagged text. Mirrors kiro/routes_openai.py.
+    if client_provides_web_search(request_data.tools):
+        logger.debug(
+            "Client provides its own web_search tool - skipping auto-injection "
+            "and Path B interception"
+        )
+    elif WEB_SEARCH_ENABLED:
         if request_data.tools is None:
             request_data.tools = []
         
