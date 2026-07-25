@@ -40,7 +40,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
@@ -63,6 +63,7 @@ from kiro.config import (
     KIRO_LIST_MODELS_ORIGIN,
     get_list_models_host,
 )
+from kiro.model_capabilities import MODEL_SOURCE_DYNAMIC, MODEL_SOURCE_STATIC
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
 from kiro.http_client import KiroHttpClient
@@ -576,6 +577,10 @@ class AccountManager:
             # 其實在「另一個 host」(q.{region}.amazonaws.com)。因此不論新舊 endpoint，
             # 都改成統一走 _fetch_models_via_list_api()，失敗才退回 FALLBACK_MODELS。
             use_dynamic = (not _is_runtime_endpoint(auth_manager)) or DYNAMIC_MODELS_ON_RUNTIME
+            # Provenance matters: only ListAvailableModels responses carry an
+            # authoritative additionalModelRequestFieldsSchema. Static lists must
+            # be tagged so capability detection never guesses from model names.
+            models_source = MODEL_SOURCE_STATIC
             if not use_dynamic:
                 logger.debug(f"Account {account_id}: Dynamic model list disabled, using static list")
                 models_list = FALLBACK_MODELS
@@ -584,6 +589,7 @@ class AccountManager:
                     models_list = await _fetch_models_via_list_api(auth_manager)
                     if not models_list:
                         raise RuntimeError("ListAvailableModels returned empty list")
+                    models_source = MODEL_SOURCE_DYNAMIC
                     logger.info(f"Account {account_id}: Fetched {len(models_list)} models via ListAvailableModels (q.amazonaws.com)")
                 except Exception as e:
                     logger.error(f"Failed to fetch models for {account_id}: {e}")
@@ -592,7 +598,7 @@ class AccountManager:
             
             # Create model cache and update
             model_cache = ModelInfoCache()
-            await model_cache.update(models_list)
+            await model_cache.update(models_list, source=models_source)
             
             # Add hidden models
             for display_name, internal_id in HIDDEN_MODELS.items():
@@ -644,7 +650,7 @@ class AccountManager:
         use_dynamic = (not _is_runtime_endpoint(account.auth_manager)) or DYNAMIC_MODELS_ON_RUNTIME
         if not use_dynamic:
             logger.debug(f"Account {account_id}: Dynamic refresh disabled, keeping static list")
-            await account.model_cache.update(FALLBACK_MODELS)
+            await account.model_cache.update(FALLBACK_MODELS, source=MODEL_SOURCE_STATIC)
             account.models_cached_at = time.time()
             self._dirty = True
             return
@@ -654,7 +660,7 @@ class AccountManager:
             if not models_list:
                 raise RuntimeError("ListAvailableModels returned empty list")
 
-            await account.model_cache.update(models_list)
+            await account.model_cache.update(models_list, source=MODEL_SOURCE_DYNAMIC)
             account.models_cached_at = time.time()
 
             # Update model_to_accounts mapping (new models may have appeared)
@@ -926,41 +932,81 @@ class AccountManager:
                 all_models.update(account.model_resolver.get_available_models())
         return sorted(all_models)
 
-    def get_model_context_window(self, model_id: str) -> Optional[int]:
+    def _locate_model(self, model_id: str) -> Optional[Tuple[ModelInfoCache, str]]:
         """
-        取得某模型的 context window（= Kiro tokenLimits.maxInputTokens）。
+        Find the cache entry backing a model id, following aliases.
 
-        供 /v1/models 端點回傳給 Grok，讓 Grok 依實際 context window
-        觸發 auto-compaction，而非套用內建預設值（256k）。
-
-        跨所有已初始化 account 的 cache 尋找，回傳第一個命中的值。
+        Alias names from MODEL_ALIASES never appear in the Kiro cache.
+        Resolving them here lets an alias inherit its target's real metadata
+        (context window and native reasoning
+        capability) instead of being judged by its own display name.
 
         Args:
-            model_id: 模型 ID（正規化後，帶點的顯示名稱）
+            model_id: Model id as advertised to clients (alias or Kiro id).
 
         Returns:
-            maxInputTokens；cache 未命中該模型時回傳 None。
+            Tuple of (cache, cache key) for the first account holding the model,
+            or None when no initialized account knows it.
         """
+        # Direct hit first: the requested id is a real cached Kiro model.
         for account in self._accounts.values():
             cache = getattr(account, "model_cache", None)
-            # 只在 cache 實際含此模型時取值，避免用到 get_max_input_tokens 的預設 fallback
             if cache is not None and cache.is_valid_model(model_id):
-                return cache.get_max_input_tokens(model_id)
+                return cache, model_id
 
-        # Alias names (MODEL_ALIASES, e.g. grok-* and the Grok Build web_search
-        # model) never appear in the Kiro cache. Resolve to the real Kiro model
-        # first so the alias still reports a true context window instead of
-        # letting the client fall back to its built-in default.
+        # Alias / normalization pass: resolve, then look the target up.
         for account in self._accounts.values():
             resolver = getattr(account, "model_resolver", None)
             cache = getattr(account, "model_cache", None)
             if resolver is None or cache is None:
                 continue
             try:
-                resolved = resolver.resolve(model_id).internal_id
-            except Exception as e:  # resolver raises on unknown/unsupported ids
-                logger.debug(f"Context window lookup: cannot resolve '{model_id}': {e}")
+                resolution = resolver.resolve(model_id)
+            except ValueError as error:
+                logger.debug(f"Model lookup: cannot resolve '{model_id}': {error}")
                 continue
-            if resolved != model_id and cache.is_valid_model(resolved):
-                return cache.get_max_input_tokens(resolved)
+            for candidate in (resolution.normalized, resolution.internal_id):
+                if candidate != model_id and cache.is_valid_model(candidate):
+                    return cache, candidate
         return None
+
+    def get_model_metadata(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Return the cached Kiro metadata backing a model ID.
+
+        The /v1/models endpoint uses this metadata for capability advertisement,
+        ensuring the UI and request converters consult the same AWS contract.
+        Aliases are resolved to their target so they inherit its capabilities.
+
+        Args:
+            model_id: Advertised alias or Kiro model ID.
+
+        Returns:
+            Cached metadata, or None when no initialized account knows the model.
+        """
+        located = self._locate_model(model_id)
+        if located is None:
+            return None
+        cache, key = located
+        return cache.get(key)
+
+    def get_model_context_window(self, model_id: str) -> Optional[int]:
+        """
+        Return the model's Kiro maxInputTokens value.
+
+        The /v1/models endpoint exposes this value to Grok so it can compact at
+        the real model limit instead of using its built-in default. The lookup
+        searches all initialized account caches and follows aliases.
+
+        Args:
+            model_id: Advertised alias or Kiro model ID.
+
+        Returns:
+            maxInputTokens, or None when no cache contains the model.
+        """
+        located = self._locate_model(model_id)
+        if located is None:
+            return None
+        # 只在 cache 實際含此模型時取值，避免用到 get_max_input_tokens 的預設 fallback
+        cache, key = located
+        return cache.get_max_input_tokens(key)

@@ -57,9 +57,9 @@ from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import (
     handle_native_web_search,
-    call_kiro_mcp_api,
     client_provides_web_search,
 )
+from kiro.web_search_provider import call_web_search, web_search_requires_kiro_auth
 from kiro.grok_web_search import (
     is_grok_web_search_request,
     extract_query_from_responses_input,
@@ -69,30 +69,17 @@ from kiro.grok_web_search import (
 
 # Grok displays Kiro labels/ids, while each value uses Grok's canonical
 # six-level enum. Conversion preserves rank across the two vocabularies.
+#
+# Order is strongest-first (Max -> None) because that is the order the client
+# renders the picker in. The literal order below IS the advertised order: it is
+# never sorted at runtime, so each entry's id/value rank pairing stays fixed and
+# a reordering is a visible, reviewable diff.
 KIRO_REASONING_EFFORT_OPTIONS = [
     ReasoningEffortOption(
-        id="none",
-        value="none",
-        label="None",
-        description="Disable Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="low",
-        value="minimal",
-        label="Low",
-        description="Low Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="medium",
-        value="low",
-        label="Medium",
-        description="Medium Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="high",
-        value="medium",
-        label="High",
-        description="High Kiro reasoning",
+        id="max",
+        value="xhigh",
+        label="Max",
+        description="Maximum Kiro reasoning",
     ),
     ReasoningEffortOption(
         id="xhigh",
@@ -101,10 +88,28 @@ KIRO_REASONING_EFFORT_OPTIONS = [
         description="Extra-high Kiro reasoning",
     ),
     ReasoningEffortOption(
-        id="max",
-        value="xhigh",
-        label="Max",
-        description="Maximum Kiro reasoning",
+        id="high",
+        value="medium",
+        label="High",
+        description="High Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="medium",
+        value="low",
+        label="Medium",
+        description="Medium Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="low",
+        value="minimal",
+        label="Low",
+        description="Low Kiro reasoning",
+    ),
+    ReasoningEffortOption(
+        id="none",
+        value="none",
+        label="None",
+        description="Disable Kiro reasoning",
     ),
 ]
 
@@ -202,11 +207,18 @@ async def get_models(request: Request):
     # 傳給 Grok 的 contextWindow 欄位，讓其依實際上限觸發 auto-compaction。
     account_manager = request.app.state.account_manager
     get_context = getattr(account_manager, "get_model_context_window", None)
+    # Capability advertisement MUST read the same metadata the converters use,
+    # otherwise the UI offers effort levels the request path cannot honour and
+    # AWS answers 400 REQUEST_BODY_INVALID (e.g. claude-haiku-4.5).
+    get_metadata = getattr(account_manager, "get_model_metadata", None)
 
     # Build OpenAI-compatible model list with Grok's optional effort metadata.
     openai_models = []
     for model_id in available_model_ids:
-        supports_native_reasoning = get_native_reasoning_format(model_id) is not None
+        model_info = get_metadata(model_id) if get_metadata else None
+        supports_native_reasoning = (
+            get_native_reasoning_format(model_id, model_info) is not None
+        )
         context_window = get_context(model_id) if get_context else None
         openai_models.append(
             OpenAIModel(
@@ -268,7 +280,7 @@ async def create_response(request: Request):
             },
         )
 
-    model = body.get("model", "grok-4.20-multi-agent")
+    model = body.get("model", "kiro-search-proxy")
     query = extract_query_from_responses_input(body)
 
     if not query:
@@ -285,36 +297,39 @@ async def create_response(request: Request):
 
     logger.info(f"Grok Build web_search request (Responses API): query={query!r}")
 
-    # Resolve an auth_manager for the Kiro MCP call. Prefer the account
-    # system's next available account; fall back to the first account (legacy).
-    account_manager = request.app.state.account_manager
-    if request.app.state.account_system:
-        account = await account_manager.get_next_account(model)
-        if account is None:
+    auth_manager = None
+    if web_search_requires_kiro_auth():
+        # Kiro MCP searches require an initialized account. DuckDuckGo searches
+        # are independent and deliberately skip account selection entirely.
+        account_manager = request.app.state.account_manager
+        if request.app.state.account_system:
+            account = await account_manager.get_next_account(model)
+            if account is None:
+                account = account_manager.get_first_account()
+        else:
             account = account_manager.get_first_account()
-    else:
-        account = account_manager.get_first_account()
 
-    if account is None or account.auth_manager is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": {
-                    "message": "No initialized accounts available for web search",
-                    "type": "api_error",
-                    "code": 503,
-                }
-            },
-        )
+        if account is None or account.auth_manager is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "No initialized accounts available for Kiro web search",
+                        "type": "api_error",
+                        "code": 503,
+                    }
+                },
+            )
+        auth_manager = account.auth_manager
 
-    tool_use_id, results = await call_kiro_mcp_api(query, account.auth_manager)
+    tool_use_id, results = await call_web_search(query, auth_manager)
 
     if results is None:
         return JSONResponse(
             status_code=502,
             content={
                 "error": {
-                    "message": "Web search failed. Please try again.",
+                    "message": "Configured web search provider failed. Check gateway logs or select another WEB_SEARCH_PROVIDER.",
                     "type": "api_error",
                     "code": 502,
                 }

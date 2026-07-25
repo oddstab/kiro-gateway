@@ -1,68 +1,87 @@
 # -*- coding: utf-8 -*-
 
-"""
-DuckDuckGo web search provider.
+"""DuckDuckGo web search provider.
 
-Used as fallback for models that cannot use Kiro MCP web_search (e.g. Grok).
-Returns the same (tool_use_id, results_dict) tuple as call_kiro_mcp_api.
+Selected with ``WEB_SEARCH_PROVIDER=duckduckgo`` (or ``ddg``). Returns the same
+``(tool_use_id, results_dict)`` tuple as the Kiro MCP provider.
 """
 
 import asyncio
 import uuid
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
+    from ddgs.exceptions import DDGSException
 except ImportError:
     DDGS = None
+    DDGSException = RuntimeError
+
+DUCKDUCKGO_BACKEND = "duckduckgo"
+WebSearchResult = Tuple[Optional[str], Optional[Dict[str, Any]]]
 
 
-async def call_duckduckgo(query: str, max_results: int = 10) -> Tuple[Optional[str], Optional[Dict]]:
-    """
-    Search DuckDuckGo and return results in the same format as call_kiro_mcp_api.
+async def call_duckduckgo(query: str, max_results: int = 10) -> WebSearchResult:
+    """Search DuckDuckGo and normalize results to the Kiro MCP shape.
 
     Args:
-        query: Search query
-        max_results: Max results to return
+        query: Search query.
+        max_results: Maximum number of results to return.
 
     Returns:
-        (tool_use_id, results_dict) or (None, None) on failure
+        A tool-use ID and normalized result dictionary, or ``(None, None)``
+        when the provider is unavailable or the search fails.
     """
     if DDGS is None:
-        logger.error("duckduckgo-search not installed")
+        logger.error("ddgs is not installed")
         return None, None
 
     try:
-        raw = await asyncio.to_thread(_ddg_search, query, max_results)
-    except Exception as e:
-        logger.error(f"DuckDuckGo search failed: {e}")
+        raw_results = await asyncio.to_thread(_ddg_search, query, max_results)
+    except DDGSException as error:
+        logger.error(f"DuckDuckGo search failed: {error}")
         return None, None
 
-    if raw is None:
-        return None, None
-
+    normalized_results = [
+        {
+            "title": result.get("title", ""),
+            "url": result.get("href", ""),
+            "snippet": result.get("body", ""),
+            "publishedDate": None,
+        }
+        for result in raw_results
+        if isinstance(result, dict)
+    ]
     tool_use_id = f"srvtoolu_{uuid.uuid4().hex[:32]}"
-    results = {
-        "results": [
-            {
-                "title": r.get("title", ""),
-                "url": r.get("href", ""),
-                "snippet": r.get("body", ""),
-                "publishedDate": None,
-            }
-            for r in raw
-        ],
-        "totalResults": len(raw),
+    results: Dict[str, Any] = {
+        "results": normalized_results,
+        "totalResults": len(normalized_results),
         "query": query,
     }
 
-    logger.debug(f"DuckDuckGo returned {len(raw)} results for: {query}")
+    logger.debug(
+        f"DuckDuckGo returned {len(normalized_results)} results for: {query}"
+    )
     return tool_use_id, results
 
 
-def _ddg_search(query: str, max_results: int):
-    """Sync wrapper — runs in thread via asyncio.to_thread."""
+def _ddg_search(query: str, max_results: int) -> List[Dict[str, Any]]:
+    """Run the synchronous DuckDuckGo client inside a worker thread.
+
+    Args:
+        query: Search query.
+        max_results: Maximum number of results to return.
+
+    Returns:
+        Raw DuckDuckGo result dictionaries.
+    """
     with DDGS() as ddgs:
-        return list(ddgs.text(query, max_results=max_results))
+        return list(
+            ddgs.text(
+                query,
+                backend=DUCKDUCKGO_BACKEND,
+                max_results=max_results,
+            )
+        )

@@ -22,9 +22,9 @@ Grok Build web_search proxy (OpenAI Responses API format).
 
 Grok Build's client-side web_search tool sends POST /v1/responses requests in
 OpenAI Responses API format with a {"type": "web_search"} tool. This module
-detects those requests, runs a real Kiro MCP web search via call_kiro_mcp_api,
-and returns the results in the Responses API shape that Grok Build's
-async-openai parser accepts.
+detects those requests, runs the configured gateway web search provider, and
+returns the results in the Responses API shape that Grok Build's async-openai
+parser accepts.
 
 Unlike the Path A / Path B handlers in mcp_tools.py (which emit results as
 <web_search> tagged text inside chat/messages responses), this returns a
@@ -38,11 +38,11 @@ Shape matters: the client deserializes the whole body into async-openai's
 object with the wrong nested fields) makes the entire parse fail -- HTTP 200 but
 the tool reports "failed". Keep additions aligned with that struct.
 
-IMPORTANT -- how Grok Build reaches this endpoint: its web_search tool resolves
-`models.web_search` against the model list from /v1/models. If that id is
-missing, `resolve_web_search_sampling_config()` falls back to xAI's own
-inference endpoint and this gateway is never called. `GROK_WEB_SEARCH_MODEL` in
-kiro/config.py exists to keep the id advertised.
+IMPORTANT -- how Grok Build reaches this endpoint: configure a client-side
+`[model.kiro-search-proxy]` entry whose `base_url` points to this gateway, then
+set `models.web_search = "kiro-search-proxy"`. Grok Build resolves that local
+entry and posts directly to `/v1/responses`; the proxy id is intentionally not
+a Kiro chat-model alias and is not advertised by `/v1/models`.
 """
 
 import time

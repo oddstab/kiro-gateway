@@ -173,15 +173,11 @@ def _make_tool_call_bytes(query: str) -> list:
 
 @pytest.fixture
 def fake_search_backend(monkeypatch):
-    """把兩個搜尋後端換掉，其餘流程全部走真實程式碼。"""
-    async def _fake_mcp(query, auth_manager=None):
+    """Replace the configured provider while exercising real stream code."""
+    async def _fake_search(query, auth_manager=None):
         return "srvtoolu_x", BACKEND_RESULTS
 
-    async def _fake_ddg(query, max_results: int = 10):
-        return "srvtoolu_x", BACKEND_RESULTS
-
-    monkeypatch.setattr("kiro.mcp_tools.call_kiro_mcp_api", _fake_mcp)
-    monkeypatch.setattr("kiro.web_search_duckduckgo.call_duckduckgo", _fake_ddg)
+    monkeypatch.setattr("kiro.web_search_provider.call_web_search", _fake_search)
 
 
 @pytest.mark.asyncio
@@ -193,7 +189,7 @@ async def test_openai_client_web_search_tool_is_not_hijacked(fake_search_backend
     out = []
     async for chunk in stream_kiro_to_openai_internal(
         AsyncMock(), _fake_response(_make_tool_call_bytes("LCQ 是什麼 縮寫")),
-        "grok-4.20-multi-agent", _mock_cache(), MagicMock(),
+        "kiro-search-proxy", _mock_cache(), MagicMock(),
         request_tools=GROK_BUILD_TOOLS,
     ):
         out.append(chunk)
@@ -267,7 +263,7 @@ async def test_openai_native_web_search_tool_type_is_respected(fake_search_backe
     out = []
     async for chunk in stream_kiro_to_openai_internal(
         AsyncMock(), _fake_response(_make_tool_call_bytes("LCQ")),
-        "grok-4.20-multi-agent", _mock_cache(), MagicMock(),
+        "kiro-search-proxy", _mock_cache(), MagicMock(),
         request_tools=[{"type": "web_search_20250305"}],
     ):
         out.append(chunk)

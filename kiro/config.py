@@ -266,37 +266,11 @@ HIDDEN_MODELS: Dict[str, str] = {
 #       "gpt-5": "claude-sonnet-4.5"
 #   }
 #
-# Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
-_GROK_TARGET = os.getenv("GROK_TARGET_MODEL", "claude-opus-4-6[1m]")
-
-# Grok Build's web_search tool resolves its own model before calling the
-# Responses API. `resolve_web_search_sampling_config()` (grok-build:
-# crates/codegen/xai-grok-shell/src/agent/config.rs) looks the model id up in
-# the model list served by /v1/models:
-#
-#   1. find_model_by_id(models, web_search_model) -> reuses THAT entry's
-#      base_url + api_key, so the search request lands on this gateway.
-#   2. Not found and id == default_web_search_model() -> falls back to
-#      `endpoints.resolve_inference_base_url()`, i.e. xAI's own endpoint.
-#      The gateway never sees the request, and Grok Build's web_search runs
-#      against upstream (or fails), which is why raw <web_search> tagged text
-#      used to surface in chat instead of real search results.
-#
-# So the gateway MUST advertise this model id for path 1 to win. The default
-# matches grok-build's compiled-in default (`default_web_search_model()`, see
-# xai-grok-workspace/src/session/tool_config.rs); override it with
-# GROK_WEB_SEARCH_MODEL to match a customised Grok Build config.
-GROK_WEB_SEARCH_MODEL: str = os.getenv("GROK_WEB_SEARCH_MODEL", "grok-4.20-multi-agent")
-
+# Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict.
+# Grok Build search routing is configured client-side with
+# [model.kiro-search-proxy]; it is not a Kiro chat-model alias.
 MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",
-    "grok-4": _GROK_TARGET,
-    "grok-4-fast": _GROK_TARGET,
-    "grok-3": _GROK_TARGET,
-    "grok-4.5": _GROK_TARGET,
-    # Advertised so Grok Build's web_search resolves to this gateway (path 1
-    # above). Chat requests for it still work: it maps to a real Kiro model.
-    GROK_WEB_SEARCH_MODEL: _GROK_TARGET,
 }
 
 # Models to hide from /v1/models endpoint.
@@ -494,10 +468,11 @@ NATIVE_REASONING_ENABLED: bool = _NATIVE_REASONING_RAW not in ("false", "0", "no
 # with <thinking>...</thinking> blocks that we parse and convert to reasoning_content.
 # It works great, but it's a hack - hence "fake" reasoning.
 #
-# Default: true (enabled) - provides premium experience out of the box
-_FAKE_REASONING_RAW: str = os.getenv("FAKE_REASONING", "").lower()
-# Default is True - if env var is not set or empty, enable fake reasoning
-FAKE_REASONING_ENABLED: bool = _FAKE_REASONING_RAW not in ("false", "0", "no", "disabled", "off")
+# Disabled by default because this is prompt simulation, not a model-native
+# reasoning protocol. Set FAKE_REASONING=true to opt in.
+FAKE_REASONING_ENABLED: bool = os.getenv(
+    "FAKE_REASONING", "false"
+).lower() in ("true", "1", "yes", "enabled", "on")
 
 # Maximum thinking length in tokens (default budget when client doesn't specify).
 # This value is injected into the request as <max_thinking_length>{value}</max_thinking_length>
@@ -567,6 +542,41 @@ AUTO_TRIM_PAYLOAD: bool = os.getenv("AUTO_TRIM_PAYLOAD", "false").lower() in ("t
 #
 # Note: Native Anthropic server-side tools (Path A) work ALWAYS, regardless of this setting
 WEB_SEARCH_ENABLED: bool = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+
+WEB_SEARCH_PROVIDER_KIRO: str = "kiro"
+WEB_SEARCH_PROVIDER_DUCKDUCKGO: str = "duckduckgo"
+_WEB_SEARCH_PROVIDER_ALIASES: Dict[str, str] = {
+    WEB_SEARCH_PROVIDER_KIRO: WEB_SEARCH_PROVIDER_KIRO,
+    WEB_SEARCH_PROVIDER_DUCKDUCKGO: WEB_SEARCH_PROVIDER_DUCKDUCKGO,
+    "ddg": WEB_SEARCH_PROVIDER_DUCKDUCKGO,
+    "duckgo": WEB_SEARCH_PROVIDER_DUCKDUCKGO,
+}
+
+
+def normalize_web_search_provider(value: str) -> str:
+    """Normalize and validate a configured web search provider.
+
+    Args:
+        value: Provider name from ``WEB_SEARCH_PROVIDER``.
+
+    Returns:
+        Canonical provider name.
+
+    Raises:
+        ValueError: If the provider name is unsupported.
+    """
+    normalized = value.strip().lower()
+    try:
+        return _WEB_SEARCH_PROVIDER_ALIASES[normalized]
+    except KeyError as error:
+        raise ValueError(
+            "WEB_SEARCH_PROVIDER must be one of: kiro, duckduckgo, ddg, duckgo"
+        ) from error
+
+
+WEB_SEARCH_PROVIDER: str = normalize_web_search_provider(
+    os.getenv("WEB_SEARCH_PROVIDER", WEB_SEARCH_PROVIDER_KIRO)
+)
 
 # ==================================================================================================
 # Account System Settings

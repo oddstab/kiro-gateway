@@ -56,6 +56,7 @@ from kiro.utils import generate_conversation_id
 from kiro.tokenizer import estimate_request_tokens
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search, client_provides_web_search
+from kiro.web_search_provider import web_search_requires_kiro_auth
 
 # Import debug_logger
 try:
@@ -299,25 +300,30 @@ async def messages(
         for tool in request_data.tools:
             tool_type = getattr(tool, "type", None)
             if tool_type and tool_type.startswith("web_search"):
-                # Path A: Early return, direct MCP call
-                # Get auth_manager from first available account (no failover needed for early return)
-                account = request.app.state.account_manager.get_first_account()
-                if not account.auth_manager:
-                    logger.error("No initialized accounts available for native web_search")
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "type": "error",
-                            "error": {
-                                "type": "api_error",
-                                "message": "No initialized accounts available"
+                auth_manager = None
+                if web_search_requires_kiro_auth():
+                    account = request.app.state.account_manager.get_first_account()
+                    if account is None or account.auth_manager is None:
+                        logger.error("No initialized accounts available for Kiro web_search")
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "type": "error",
+                                "error": {
+                                    "type": "api_error",
+                                    "message": "No initialized accounts available for Kiro web search"
+                                }
                             }
-                        }
-                    )
-                auth_manager = account.auth_manager
-                
-                logger.info("Detected native Anthropic web_search (Path A), routing to MCP API")
-                return await handle_native_web_search(request, request_data, auth_manager, api_format="anthropic")
+                        )
+                    auth_manager = account.auth_manager
+
+                logger.info("Detected native Anthropic web_search, routing to configured provider")
+                return await handle_native_web_search(
+                    request,
+                    request_data,
+                    auth_manager,
+                    api_format="anthropic",
+                )
     
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode

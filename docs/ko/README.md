@@ -37,24 +37,6 @@
 | 📦 Claude Sonnet 4.0 | 200K | 1.3x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | ⚡ Claude Haiku 4.5 | 200K | 0.4x | us-east-1, eu-central-1 | | ✓ | ✓ | ✓ |
 
-### Grok 호환성
-
-게이트웨이는 Grok 모델 이름을 별칭으로 지원하여 xAI API의 드롭인 대체품으로 사용 가능:
-
-| Grok 모델 | 기본 매핑 대상 |
-|-----------|----------|
-| `grok-4.5` | `claude-opus-4-6[1m]` |
-| `grok-4` | `claude-opus-4-6[1m]` |
-| `grok-4-fast` | `claude-opus-4-6[1m]` |
-| `grok-3` | `claude-opus-4-6[1m]` |
-
-`.env`에서 `GROK_TARGET_MODEL`을 설정하여 매핑 대상을 사용자 정의 가능:
-
-```env
-# 기본값은 claude-opus-4-6[1m], 지원되는 모든 모델로 변경 가능
-GROK_TARGET_MODEL="claude-opus-4-8[1m]"
-```
-
 ### 오픈 모델
 
 | 모델 | Context | 비용 | 리전 | Free | Pro | Pro+ | Power |
@@ -65,7 +47,7 @@ GROK_TARGET_MODEL="claude-opus-4-8[1m]"
 | 🧩 MiniMax M2.1 | 200K | 0.15x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 | 🤖 Qwen3-Coder-Next | 256K | 0.05x | us-east-1, eu-central-1 | ✓ | ✓ | ✓ | ✓ |
 
-> 💡 **스마트 모델 해석:** 어떤 모델 이름 형식이든 사용 가능 — `claude-sonnet-4-5`, `claude-sonnet-4.5`, `grok-4`, 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름도. 게이트웨이가 자동으로 정규화합니다.
+> 💡 **스마트 모델 해석:** `claude-sonnet-4-5`, `claude-sonnet-4.5` 또는 `claude-sonnet-4-5-20250929`와 같은 버전 이름을 사용할 수 있습니다. 게이트웨이가 자동으로 정규화합니다.
 
 ---
 
@@ -562,25 +544,30 @@ cc() {
 
 ### Grok Build
 
-환경 변수를 설정하여 Grok Build를 게이트웨이에 연결 (Grok 모델 이름은 자동으로 Claude 모델에 매핑):
+Grok Build를 이 게이트웨이에 연결하고 `/v1/models`에 표시되는 실제 Kiro 모델 id를
+선택하세요. `grok-*` 이름은 Claude 모델 별칭으로 제공되지 않습니다.
 
 ```powershell
 # PowerShell profile
 function gg {
     $env:GROK_XAI_API_BASE_URL = "http://localhost:8000/v1"
     $env:GROK_CODE_XAI_API_KEY = "kiro-gateway-local"  # .env의 PROXY_API_KEY에 대응
-    & "$env:USERPROFILE\.grok\bin\grok.exe" --disable-web-search @args
+    & "$env:USERPROFILE\.grok\bin\grok.exe" @args
 }
 ```
 
-Grok Build의 `grok-4` 등의 요청은 자동으로 `GROK_TARGET_MODEL` (기본값 `claude-opus-4.6`, `.env`에서 변경 가능)에 매핑됩니다.
+웹 검색은 `models.web_search = "kiro-search-proxy"`와
+`http://localhost:8000/v1`을 가리키는 `[model.kiro-search-proxy]` 항목을
+`api_backend = "responses"`로 설정하세요. 이 proxy id는 채팅 모델로 광고되지 않습니다.
+검색 백엔드는 게이트웨이 `.env`의 `WEB_SEARCH_PROVIDER=kiro`(기본 Kiro MCP) 또는
+`WEB_SEARCH_PROVIDER=duckduckgo`(`ddg`, `duckgo` 별칭 지원)로 선택합니다.
 
 **Linux/macOS:**
 ```bash
 gg() {
     GROK_XAI_API_BASE_URL='http://localhost:8000/v1' \
     GROK_CODE_XAI_API_KEY='kiro-gateway-local' \
-    grok --disable-web-search "$@"
+    grok "$@"
 }
 ```
 
