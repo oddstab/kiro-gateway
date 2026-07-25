@@ -2347,3 +2347,80 @@ class TestAnthropicUnsupportedNativeReasoningModels:
         assert "additionalModelRequestFields" not in payload
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
+
+
+# ==================================================================================================
+# Tests for empty-content handling in the shipped Anthropic -> Kiro payload
+# ==================================================================================================
+
+
+class TestAnthropicEmptyContentHasNoVisibleSentinel:
+    """
+    Regression: empty content used to be replaced with a visible
+    "(empty placeholder)" string, which Kiro then echoed back into answers.
+    The content key must stay present, but empty.
+    """
+
+    SENTINEL = "(empty placeholder)"
+
+    def _payload_json(self, messages):
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5", messages=messages, max_tokens=1024
+        )
+        payload = anthropic_to_kiro(request, "conv-empty", "")
+        return payload, json.dumps(payload)
+
+    def test_tool_use_round_trip_keeps_content_empty(self):
+        """
+        What it does: Runs a tool_use turn plus its tool_result turn.
+        Purpose: Tool chains are where the echoed sentinel came from.
+        """
+        messages = [
+            AnthropicMessage(role="user", content="Weather in Taipei?"),
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    ToolUseContentBlock(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="get_weather",
+                        input={"city": "Taipei"},
+                    )
+                ],
+            ),
+            AnthropicMessage(
+                role="user",
+                content=[
+                    ToolResultContentBlock(
+                        type="tool_result", tool_use_id="toolu_1", content="28C, sunny"
+                    )
+                ],
+            ),
+            AnthropicMessage(role="user", content="Summarize it."),
+        ]
+
+        payload, raw = self._payload_json(messages)
+
+        assert self.SENTINEL not in raw
+        for entry in payload["conversationState"]["history"]:
+            message = next(iter(entry.values()))
+            assert "content" in message
+
+    def test_assistant_first_conversation_uses_empty_synthetic_turn(self):
+        """
+        What it does: Starts the conversation with an assistant message.
+        Purpose: The synthetic user turn stays structurally valid but invisible.
+        """
+        messages = [
+            AnthropicMessage(role="assistant", content="Continuing from before"),
+            AnthropicMessage(role="user", content="Go on"),
+        ]
+
+        payload, raw = self._payload_json(messages)
+
+        assert self.SENTINEL not in raw
+        first = payload["conversationState"]["history"][0]["userInputMessage"]
+        # The system prompt addition is prepended to this synthetic turn, so the
+        # guarantee is the absence of the sentinel, not a byte-empty string.
+        assert "content" in first
+        assert self.SENTINEL not in first["content"]

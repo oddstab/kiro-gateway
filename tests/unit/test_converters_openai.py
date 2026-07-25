@@ -739,7 +739,7 @@ class TestBuildKiroPayload:
     def test_handles_assistant_as_last_message(self):
         """
         What it does: Verifies handling of assistant as last message.
-        Purpose: Ensure "(empty placeholder)" message is created.
+        Purpose: Ensure an empty content field is produced.
         """
         print("Setup: Request with assistant at the end...")
         request = ChatCompletionRequest(
@@ -755,7 +755,7 @@ class TestBuildKiroPayload:
         
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
-        assert current_content == "(empty placeholder)"
+        assert current_content == ""
 
     def test_omits_unsigned_reasoning_when_assistant_is_last_message(self):
         """Unsigned current assistant reasoning must not produce invalid Kiro history."""
@@ -797,8 +797,8 @@ class TestBuildKiroPayload:
     
     def test_uses_continue_for_empty_content(self):
         """
-        What it does: Verifies using "(empty placeholder)" for empty content.
-        Purpose: Ensure empty message is replaced with "(empty placeholder)".
+        What it does: Verifies keeping empty content as an empty string.
+        Purpose: Ensure empty message is kept as an empty string.
         """
         print("Setup: Request with empty content...")
         request = ChatCompletionRequest(
@@ -813,7 +813,7 @@ class TestBuildKiroPayload:
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
-        assert current_content == "(empty placeholder)"
+        assert current_content == ""
     
     def test_normalizes_model_id_correctly(self):
         """
@@ -2202,3 +2202,88 @@ class TestOpenAIUnsupportedNativeReasoningModels:
         assert "additionalModelRequestFields" not in payload
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
+
+
+# ==================================================================================================
+# Tests for empty-content handling in the shipped OpenAI -> Kiro payload
+# ==================================================================================================
+
+
+class TestEmptyContentHasNoVisibleSentinel:
+    """
+    Regression: the converter used to fill empty content with a visible
+    "(empty placeholder)" string. Kiro read it back from the tool-call history
+    and started echoing it into assistant answers. Kiro only requires the
+    content key to exist; an empty string is accepted.
+    """
+
+    SENTINEL = "(empty placeholder)"
+
+    def _payload_json(self, messages):
+        request = ChatCompletionRequest(model="claude-sonnet-4.5", messages=messages)
+        payload = build_kiro_payload(request, "conv-empty", "")
+        return payload, json.dumps(payload)
+
+    def test_tool_call_round_trip_keeps_content_empty(self):
+        """
+        What it does: Runs a tool-only assistant turn plus its tool result.
+        Purpose: The exact shape Grok Build sends must stay sentinel-free.
+        """
+        messages = [
+            ChatMessage(role="user", content="What is the weather in Taipei?"),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Taipei"}'},
+                    }
+                ],
+            ),
+            ChatMessage(role="tool", tool_call_id="call_1", content="28C, sunny"),
+            ChatMessage(role="user", content="Thanks, summarize it."),
+        ]
+
+        payload, raw = self._payload_json(messages)
+
+        assert self.SENTINEL not in raw
+        for entry in payload["conversationState"]["history"]:
+            message = next(iter(entry.values()))
+            assert "content" in message
+
+    def test_empty_current_user_message_stays_empty(self):
+        """
+        What it does: Sends a final user turn with no text.
+        Purpose: The required content key stays present but empty.
+        """
+        messages = [
+            ChatMessage(role="user", content="First"),
+            ChatMessage(role="assistant", content="Second"),
+            ChatMessage(role="user", content=""),
+        ]
+
+        payload, raw = self._payload_json(messages)
+
+        assert self.SENTINEL not in raw
+        assert payload["conversationState"]["currentMessage"]["userInputMessage"]["content"] == ""
+
+    def test_assistant_first_conversation_uses_empty_synthetic_turn(self):
+        """
+        What it does: Starts the conversation with an assistant message.
+        Purpose: The synthetic user turn Kiro requires must be invisible.
+        """
+        messages = [
+            ChatMessage(role="assistant", content="Continuing from before"),
+            ChatMessage(role="user", content="Go on"),
+        ]
+
+        payload, raw = self._payload_json(messages)
+
+        assert self.SENTINEL not in raw
+        first = payload["conversationState"]["history"][0]["userInputMessage"]
+        # The system prompt addition is prepended to this synthetic turn, so the
+        # guarantee is the absence of the sentinel, not a byte-empty string.
+        assert "content" in first
+        assert self.SENTINEL not in first["content"]
