@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -143,7 +143,7 @@ PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
 # - Environment variables: Falls back to this SSO region
 #
 # For manual override of API region, use KIRO_API_REGION environment variable.
-# See: https://github.com/jwadow/kiro-gateway/issues/132
+# See: https://github.com/oddstab/kiro-gateway/issues/132
 REGION: str = os.getenv("KIRO_REGION", "us-east-1")
 
 # Path to credentials file (optional, alternative to .env)
@@ -183,6 +183,27 @@ KIRO_API_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
+
+# Host for the ListAvailableModels operation (dynamic model catalogue).
+#
+# 重點：模型清單 API 與對話 API 在「不同 host」。
+# - 對話（GenerateAssistantResponse）走 runtime.{region}.kiro.dev
+# - 列模型（ListAvailableModels）走 q.{region}.amazonaws.com（awsJson1.0 RPC）
+# runtime.kiro.dev 不認得 ListAvailableModels（會回 400 UnknownOperationException），
+# 所以動態清單必須改打這個 host。實測 us-east-1 + origin=AI_EDITOR 可列出完整清單
+# （含 claude-opus-5 等新模型），eu-central-1 則回 400，故預設鎖 us-east-1。
+# 來源：amazon-q-developer-cli 前身原始碼（chat-cli/api_client/endpoints.rs）+ 實測驗證。
+KIRO_LIST_MODELS_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
+
+# ListAvailableModels 的 awsJson1.0 target header
+KIRO_LIST_MODELS_TARGET: str = "AmazonCodeWhispererService.ListAvailableModels"
+
+# ListAvailableModels 固定使用的 region（實測只有 us-east-1 可用，eu-central-1 回 400）
+# 可用 KIRO_LIST_MODELS_REGION 覆寫。
+KIRO_LIST_MODELS_REGION: str = os.getenv("KIRO_LIST_MODELS_REGION", "us-east-1")
+
+# 列模型用的 origin。實測 AI_EDITOR 回完整清單（19 個），CLI 只回精簡清單（3 個）。
+KIRO_LIST_MODELS_ORIGIN: str = os.getenv("KIRO_LIST_MODELS_ORIGIN", "AI_EDITOR")
 
 # ==================================================================================================
 # Token Settings
@@ -278,6 +299,13 @@ HIDDEN_FROM_LIST: List[str] = ["auto"]
 # - Some models may not be available on your Kiro plan (e.g., Opus on free tier)
 # - New models released after this version won't appear here
 # - Update gateway regularly to get the latest model list
+# 是否對 runtime.kiro.dev 帳號啟用動態模型清單（改打 q.amazonaws.com 的 ListAvailableModels）。
+# 預設 true：優先動態抓取，失敗才退回下方 FALLBACK_MODELS。
+# 設為 false 則完全走靜態清單（舊行為）。
+DYNAMIC_MODELS_ON_RUNTIME: bool = os.getenv(
+    "DYNAMIC_MODELS_ON_RUNTIME", "true"
+).lower() in ("true", "1", "yes")
+
 FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "auto"},
     {"modelId": "claude-sonnet-4"},
@@ -288,7 +316,11 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-opus-4.6"},
     {"modelId": "claude-opus-4.7"},
     {"modelId": "claude-opus-4.8"},
+    {"modelId": "claude-opus-5"},
     {"modelId": "claude-sonnet-5"},
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
@@ -568,7 +600,7 @@ STATE_SAVE_INTERVAL_SECONDS: int = int(os.getenv("STATE_SAVE_INTERVAL_SECONDS", 
 
 APP_VERSION: str = "2.4.dev.13"
 APP_TITLE: str = "Kiro Gateway"
-APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @jwadow"
+APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @oddstab"
 
 
 def get_kiro_refresh_url(region: str) -> str:
@@ -589,4 +621,14 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
+
+
+def get_list_models_host(region: Optional[str] = None) -> str:
+    """Return the ListAvailableModels host (q.{region}.amazonaws.com).
+
+    列模型 API 與對話 API 在不同 host。預設鎖 us-east-1（實測唯一可用）。
+    """
+    return KIRO_LIST_MODELS_HOST_TEMPLATE.format(
+        region=region or KIRO_LIST_MODELS_REGION
+    )
 

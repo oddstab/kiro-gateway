@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -194,15 +194,22 @@ async def get_models(request: Request):
         account = request.app.state.account_manager.get_first_account()
         available_model_ids = account.model_resolver.get_available_models()
     
+    # 帳號系統下可查各模型真實 context window（= Kiro tokenLimits.maxInputTokens），
+    # 傳給 Grok 的 contextWindow 欄位，讓其依實際上限觸發 auto-compaction。
+    account_manager = request.app.state.account_manager
+    get_context = getattr(account_manager, "get_model_context_window", None)
+
     # Build OpenAI-compatible model list with Grok's optional effort metadata.
     openai_models = []
     for model_id in available_model_ids:
         supports_native_reasoning = get_native_reasoning_format(model_id) is not None
+        context_window = get_context(model_id) if get_context else None
         openai_models.append(
             OpenAIModel(
                 id=model_id,
                 owned_by="anthropic",
                 description="Model via Kiro API",
+                context_window=context_window,
                 supports_reasoning_effort=supports_native_reasoning,
                 reasoning_efforts=(
                     KIRO_REASONING_EFFORT_OPTIONS

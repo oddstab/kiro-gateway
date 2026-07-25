@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/oddstab/kiro-gateway
+# Copyright (C) 2025 oddstab
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -58,6 +58,10 @@ from kiro.config import (
     ACCOUNT_CACHE_TTL,
     STATE_SAVE_INTERVAL_SECONDS,
     FALLBACK_MODELS,
+    DYNAMIC_MODELS_ON_RUNTIME,
+    KIRO_LIST_MODELS_TARGET,
+    KIRO_LIST_MODELS_ORIGIN,
+    get_list_models_host,
 )
 from kiro.utils import get_kiro_headers
 from kiro.account_errors import ErrorType
@@ -91,6 +95,76 @@ def _is_runtime_endpoint(auth_manager: KiroAuthManager) -> bool:
         False
     """
     return "://runtime." in auth_manager.api_host
+
+
+async def _fetch_models_via_list_api(auth_manager: KiroAuthManager) -> List[Dict]:
+    """透過 q.{region}.amazonaws.com 的 ListAvailableModels 抓取動態模型清單。
+
+    重點：這個 operation 走的是 awsJson1.0 RPC，且 host 與對話用的
+    runtime.kiro.dev「不同」——
+      POST https://q.{region}.amazonaws.com/?origin=AI_EDITOR[&profileArn=...]
+      Header: x-amz-target: AmazonCodeWhispererService.ListAvailableModels
+              Content-Type: application/x-amz-json-1.0
+              Authorization: Bearer <token>
+      Body:   {"origin": "AI_EDITOR", "profileArn": "..."}
+
+    支援 nextToken 分頁（照 SDK 行為逐頁抓取）。
+
+    Args:
+        auth_manager: 已初始化的 auth manager（提供 token / profile_arn）
+
+    Returns:
+        模型 dict 清單（每筆含 modelId / tokenLimits 等）。
+
+    Raises:
+        任何網路/HTTP 例外由呼叫端捕捉並退回 FALLBACK_MODELS。
+    """
+    host = get_list_models_host()
+    url = f"{host}/"
+    profile_arn = auth_manager.profile_arn
+
+    all_models: List[Dict] = []
+    next_token: Optional[str] = None
+
+    # 分頁保護：最多 20 頁，避免異常回應造成無限迴圈
+    # ponytail: 上限 20 頁；正常清單遠小於此，超過代表 API 行為異常
+    for _ in range(20):
+        token = await auth_manager.get_access_token()
+        headers = get_kiro_headers(auth_manager, token)
+        headers["x-amz-target"] = KIRO_LIST_MODELS_TARGET
+
+        params = {"origin": KIRO_LIST_MODELS_ORIGIN}
+        body: Dict = {"origin": KIRO_LIST_MODELS_ORIGIN}
+        if profile_arn:
+            params["profileArn"] = profile_arn
+            body["profileArn"] = profile_arn
+        if next_token:
+            params["nextToken"] = next_token
+            body["nextToken"] = next_token
+
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.post(
+                url,
+                headers=headers,
+                params=params,
+                content=json.dumps(body).encode(),
+            )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"ListAvailableModels HTTP {response.status_code}: {response.text[:200]}"
+            )
+
+        data = response.json()
+        page = data.get("models", [])
+        if isinstance(page, list):
+            all_models.extend(page)
+
+        next_token = data.get("nextToken")
+        if not next_token:
+            break
+
+    return all_models
 
 
 def _format_duration(seconds: float) -> str:
@@ -497,48 +571,24 @@ class AccountManager:
             # Get token to verify credentials
             token = await auth_manager.get_access_token()
             
-            # Determine if we should fetch models or use static list
-            if _is_runtime_endpoint(auth_manager):
-                # New runtime endpoint does not provide /ListAvailableModels (AWS limitation)
-                # Use static list without attempting request
-                logger.debug(f"Account {account_id}: Using static model list for runtime.kiro.dev endpoint")
+            # 抓取模型清單。
+            # runtime.kiro.dev 對話 endpoint 不提供 ListAvailableModels，但模型清單 API
+            # 其實在「另一個 host」(q.{region}.amazonaws.com)。因此不論新舊 endpoint，
+            # 都改成統一走 _fetch_models_via_list_api()，失敗才退回 FALLBACK_MODELS。
+            use_dynamic = (not _is_runtime_endpoint(auth_manager)) or DYNAMIC_MODELS_ON_RUNTIME
+            if not use_dynamic:
+                logger.debug(f"Account {account_id}: Dynamic model list disabled, using static list")
                 models_list = FALLBACK_MODELS
             else:
-                # Old endpoint - attempt to fetch dynamic model list
-                # Fetch models list with retry + fallback
-                params = {"origin": "AI_EDITOR"}
-                if auth_manager.auth_type == AuthType.KIRO_DESKTOP and auth_manager.profile_arn:
-                    params["profileArn"] = auth_manager.profile_arn
-                
-                list_models_url = f"{auth_manager.q_host}/ListAvailableModels"
-                
-                # Use KiroHttpClient for retry logic (3 attempts with exponential backoff)
-                http_client = KiroHttpClient(auth_manager, shared_client=None)
-                
                 try:
-                    response = await http_client.request_with_retry(
-                        method="GET",
-                        url=list_models_url,
-                        json_data=None,
-                        params=params,
-                        stream=False
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        models_list = data.get("models", [])
-                    else:
-                        # Shouldn't happen (retry handles non-200), but keep for safety
-                        raise Exception(f"HTTP {response.status_code}")
-                
+                    models_list = await _fetch_models_via_list_api(auth_manager)
+                    if not models_list:
+                        raise RuntimeError("ListAvailableModels returned empty list")
+                    logger.info(f"Account {account_id}: Fetched {len(models_list)} models via ListAvailableModels (q.amazonaws.com)")
                 except Exception as e:
-                    # All retries exhausted - use fallback
-                    logger.error(f"Failed to fetch models for {account_id} after retries: {e}")
+                    logger.error(f"Failed to fetch models for {account_id}: {e}")
                     logger.warning("Using pre-configured fallback models. Models will be refreshed on next TTL cycle when network recovers.")
                     models_list = FALLBACK_MODELS
-                
-                finally:
-                    await http_client.close()
             
             # Create model cache and update
             model_cache = ModelInfoCache()
@@ -589,58 +639,38 @@ class AccountManager:
         if not account or not account.auth_manager:
             return
         
-        # Check if using runtime endpoint (no dynamic model list available)
-        if _is_runtime_endpoint(account.auth_manager):
-            # Runtime endpoint does not provide /ListAvailableModels
-            # Use static list and update cache timestamp
-            logger.debug(f"Account {account_id}: Skipping model refresh for runtime.kiro.dev endpoint (using static list)")
+        # 模型清單走 q.{region}.amazonaws.com 的 ListAvailableModels（與對話 endpoint 不同 host）。
+        # runtime endpoint 帳號可用 DYNAMIC_MODELS_ON_RUNTIME 關閉動態刷新。
+        use_dynamic = (not _is_runtime_endpoint(account.auth_manager)) or DYNAMIC_MODELS_ON_RUNTIME
+        if not use_dynamic:
+            logger.debug(f"Account {account_id}: Dynamic refresh disabled, keeping static list")
             await account.model_cache.update(FALLBACK_MODELS)
             account.models_cached_at = time.time()
             self._dirty = True
             return
-        
-        # Old endpoint - attempt to fetch dynamic model list
-        # Use KiroHttpClient for retry logic
-        http_client = KiroHttpClient(account.auth_manager, shared_client=None)
-        
+
         try:
-            params = {"origin": "AI_EDITOR"}
-            if account.auth_manager.auth_type == AuthType.KIRO_DESKTOP and account.auth_manager.profile_arn:
-                params["profileArn"] = account.auth_manager.profile_arn
-            
-            list_models_url = f"{account.auth_manager.q_host}/ListAvailableModels"
-            
-            response = await http_client.request_with_retry(
-                method="GET",
-                url=list_models_url,
-                json_data=None,
-                params=params,
-                stream=False
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                models_list = data.get("models", [])
-                await account.model_cache.update(models_list)
-                account.models_cached_at = time.time()
-                
-                # Update model_to_accounts mapping (new models may have appeared)
-                available_models = account.model_resolver.get_available_models()
-                for model in available_models:
-                    if model not in self._model_to_accounts:
-                        self._model_to_accounts[model] = ModelAccountList()
-                    if account_id not in self._model_to_accounts[model].accounts:
-                        self._model_to_accounts[model].accounts.append(account_id)
-                
-                logger.debug(f"Refreshed models for {account_id}")
-                self._dirty = True
-        
+            models_list = await _fetch_models_via_list_api(account.auth_manager)
+            if not models_list:
+                raise RuntimeError("ListAvailableModels returned empty list")
+
+            await account.model_cache.update(models_list)
+            account.models_cached_at = time.time()
+
+            # Update model_to_accounts mapping (new models may have appeared)
+            available_models = account.model_resolver.get_available_models()
+            for model in available_models:
+                if model not in self._model_to_accounts:
+                    self._model_to_accounts[model] = ModelAccountList()
+                if account_id not in self._model_to_accounts[model].accounts:
+                    self._model_to_accounts[model].accounts.append(account_id)
+
+            logger.info(f"Refreshed {len(models_list)} models for {account_id} via ListAvailableModels")
+            self._dirty = True
+
         except Exception as e:
-            # All retries exhausted - keep using stale cache
-            logger.warning(f"Failed to refresh models for {account_id} after retries: {e}")
-        
-        finally:
-            await http_client.close()
+            # 抓取失敗 - 保留現有（stale）cache，不覆寫
+            logger.warning(f"Failed to refresh models for {account_id}: {e}")
     
     async def get_next_account(self, model: str, exclude_accounts: Optional[set] = None) -> Optional[Account]:
         """
@@ -895,3 +925,25 @@ class AccountManager:
             if account.model_resolver:
                 all_models.update(account.model_resolver.get_available_models())
         return sorted(all_models)
+
+    def get_model_context_window(self, model_id: str) -> Optional[int]:
+        """
+        取得某模型的 context window（= Kiro tokenLimits.maxInputTokens）。
+
+        供 /v1/models 端點回傳給 Grok，讓 Grok 依實際 context window
+        觸發 auto-compaction，而非套用內建預設值（256k）。
+
+        跨所有已初始化 account 的 cache 尋找，回傳第一個命中的值。
+
+        Args:
+            model_id: 模型 ID（正規化後，帶點的顯示名稱）
+
+        Returns:
+            maxInputTokens；cache 未命中該模型時回傳 None。
+        """
+        for account in self._accounts.values():
+            cache = getattr(account, "model_cache", None)
+            # 只在 cache 實際含此模型時取值，避免用到 get_max_input_tokens 的預設 fallback
+            if cache is not None and cache.is_valid_model(model_id):
+                return cache.get_max_input_tokens(model_id)
+        return None
