@@ -374,12 +374,17 @@ def extract_thinking_config_from_openai(
 
     if native_format == "reasoning":
         native_reasoning = dict(reasoning or {})
-        effort = (
+        native_effort = (
             native_reasoning.get("effort")
             or (output_config or {}).get("effort")
         )
-        if not effort:
-            effort = normalize_native_reasoning_effort(request.reasoning_effort)
+        effort = normalize_native_reasoning_effort(
+            native_effort or request.reasoning_effort,
+            model_id,
+            model_info,
+            client_vocabulary=not native_effort,
+        )
+        native_reasoning.pop("effort", None)
         if effort and effort != "none":
             native_reasoning["effort"] = effort
         if native_reasoning:
@@ -396,12 +401,17 @@ def extract_thinking_config_from_openai(
         native_thinking.setdefault("display", "summarized")
 
         native_output_config = dict(output_config or {})
-        effort = (
+        native_effort = (
             native_output_config.get("effort")
             or (reasoning or {}).get("effort")
         )
-        if not effort:
-            effort = normalize_native_reasoning_effort(request.reasoning_effort)
+        effort = normalize_native_reasoning_effort(
+            native_effort or request.reasoning_effort,
+            model_id,
+            model_info,
+            client_vocabulary=not native_effort,
+        )
+        native_output_config.pop("effort", None)
         if effort and effort != "none":
             native_output_config["effort"] = effort
 

@@ -1873,17 +1873,32 @@ class TestBuildKiroPayloadIntegration:
         
         print("Creating request with reasoning_effort='medium', max_tokens=8000...")
         request = ChatCompletionRequest(
-            model="claude-sonnet-4.5",
+            model="claude-opus-4.8",
             messages=[ChatMessage(role="user", content="Test message")],
             max_tokens=8000,
             reasoning_effort="medium"
         )
-        
+        model_info = {
+            "modelId": "claude-opus-4.8",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {
+                                "enum": ["low", "medium", "high", "xhigh", "max"]
+                            }
+                        }
+                    }
+                }
+            },
+        }
+
         print("Calling build_kiro_payload...")
         payload = build_kiro_payload(
             request_data=request,
             conversation_id="test-conv-123",
-            profile_arn="arn:aws:test"
+            profile_arn="arn:aws:test",
+            model_info=model_info,
         )
         
         print("Extracting userInputMessage content...")
@@ -1926,17 +1941,17 @@ class TestNativeReasoningPayloads:
         assert "<thinking_mode>" not in content
 
     @pytest.mark.parametrize(
-        ("model", "model_info", "effort_container"),
+        ("model", "effort_container", "official_enum"),
         [
             (
-                "gpt-5.6",
-                {"additionalModelRequestFieldsSchema": {"properties": {"reasoning": {}}}},
+                "gpt-5.6-sol",
                 "reasoning",
+                ["none", "low", "medium", "high", "xhigh", "max"],
             ),
             (
                 "claude-opus-4.8",
-                {"additionalModelRequestFieldsSchema": {"properties": {"output_config": {}}}},
                 "output_config",
+                ["low", "medium", "high", "xhigh", "max"],
             ),
         ],
     )
@@ -1948,17 +1963,32 @@ class TestNativeReasoningPayloads:
             ("medium", "high"),
             ("high", "xhigh"),
             ("xhigh", "max"),
-            ("max", "max"),
         ],
     )
-    def test_maps_grok_effort_ranks_to_kiro(
+    def test_pairs_grok_effort_ranks_with_official_enum(
         self,
         model,
-        model_info,
         effort_container,
+        official_enum,
         grok_effort,
         kiro_effort,
     ):
+        """
+        What it does: Sends each Grok effort to two models whose official enums
+                      both expose five positive values.
+        Purpose: Grok's five-level scale pairs rank-by-rank with the official
+                 five positive levels, so the strongest choice reaches "max".
+        """
+        model_info = {
+            "modelId": model,
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    effort_container: {
+                        "properties": {"effort": {"enum": official_enum}}
+                    }
+                }
+            },
+        }
         request = ChatCompletionRequest(
             model=model,
             messages=[ChatMessage(role="user", content="Solve this")],
@@ -1970,7 +2000,120 @@ class TestNativeReasoningPayloads:
         native_fields = payload["additionalModelRequestFields"]
         assert native_fields[effort_container]["effort"] == kiro_effort
 
-    def test_uses_claude_native_schema_for_reasoning_effort(self):
+    @pytest.mark.parametrize(
+        ("grok_effort", "kiro_effort"),
+        [
+            ("xhigh", "max"),
+            ("high", "high"),
+            ("medium", "medium"),
+            ("low", "low"),
+            ("minimal", "low"),
+        ],
+    )
+    def test_pairs_grok_effort_with_shorter_official_enum(
+        self, grok_effort, kiro_effort
+    ):
+        """
+        What it does: Sends each Grok effort to a model whose official enum has
+                      only four values (no xhigh).
+        Purpose: Ranks pair against whatever the model publishes, and the
+                 weakest request clamps instead of failing.
+        """
+        model_info = {
+            "modelId": "claude-opus-4.6",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {"enum": ["low", "medium", "high", "max"]}
+                        }
+                    }
+                }
+            },
+        }
+        request = ChatCompletionRequest(
+            model="claude-opus-4.6",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            reasoning_effort=grok_effort,
+        )
+
+        payload = build_kiro_payload(request, "conv-effort-short", "", model_info)
+
+        assert payload["additionalModelRequestFields"]["output_config"] == {
+            "effort": kiro_effort
+        }
+
+    def test_nested_native_effort_is_not_treated_as_grok_vocabulary(self):
+        """
+        What it does: Sends a nested Kiro-native xhigh to a model that lists it.
+        Purpose: Values already in the official enum ship untouched, so a native
+                 client keeps exact control over the level it selected.
+        """
+        request = ChatCompletionRequest(
+            model="claude-opus-4.8",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            output_config={"effort": "xhigh"},
+        )
+        model_info = {
+            "modelId": "claude-opus-4.8",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {
+                                "enum": [
+                                    "low", "medium", "high", "xhigh", "max"
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        }
+
+        payload = build_kiro_payload(request, "conv-native-48", "", model_info)
+
+        assert payload["additionalModelRequestFields"]["output_config"] == {
+            "effort": "xhigh"
+        }
+
+    def test_nested_native_effort_absent_from_enum_clamps_to_nearest(self):
+        """
+        What it does: Sends nested xhigh to a model whose enum omits it.
+        Purpose: This is the reported failure - forwarding xhigh produced
+                 400 REQUEST_BODY_INVALID. It must clamp to a listed value.
+        """
+        request = ChatCompletionRequest(
+            model="claude-opus-4.6",
+            messages=[ChatMessage(role="user", content="Solve this")],
+            output_config={"effort": "xhigh"},
+        )
+        model_info = {
+            "modelId": "claude-opus-4.6",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {"enum": ["low", "medium", "high", "max"]}
+                        }
+                    }
+                }
+            },
+        }
+
+        payload = build_kiro_payload(request, "conv-46-native", "", model_info)
+
+        assert payload["additionalModelRequestFields"]["output_config"] == {
+            "effort": "max"
+        }
+
+    def test_schema_without_effort_enum_forwards_client_value(self):
+        """
+        What it does: Uses a schema that advertises output_config but no effort
+                      enum, then sends a Grok effort value.
+        Purpose: With no published enum the gateway stays a pass-through and
+                 lets Kiro arbitrate, rather than inventing a restriction.
+        """
         request = ChatCompletionRequest(
             model="claude-sonnet-4.5",
             messages=[ChatMessage(role="user", content="Solve this")],
@@ -1986,7 +2129,7 @@ class TestNativeReasoningPayloads:
 
         assert payload["additionalModelRequestFields"] == {
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": "xhigh"},
+            "output_config": {"effort": "high"},
         }
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
@@ -2160,7 +2303,7 @@ class TestOpenAIUnsupportedNativeReasoningModels:
     def test_missing_metadata_also_blocks_haiku(self):
         """
         What it does: Requests Haiku reasoning with no metadata at all.
-        Purpose: Offline FALLBACK_MODELS mode must not whitelist Haiku either.
+        Purpose: Without official metadata no native fields may be sent.
         """
         request = self._haiku_request(reasoning_effort="high")
 
@@ -2171,12 +2314,21 @@ class TestOpenAIUnsupportedNativeReasoningModels:
 
     def test_json_string_schema_still_enables_native_fields(self):
         """
-        What it does: Supplies the AWS schema as a JSON string.
-        Purpose: Fail-closed must not break the legitimate string encoding.
+        What it does: Supplies the official schema as a JSON string.
+        Purpose: Fail-closed must not break the legitimate string encoding, and
+                 the effort enum inside it must still be honoured.
         """
         model_info = dict(self.HAIKU_METADATA)
         model_info["additionalModelRequestFieldsSchema"] = json.dumps(
-            {"properties": {"output_config": {"type": "object"}}}
+            {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {"enum": ["low", "medium", "high", "max"]}
+                        }
+                    }
+                }
+            }
         )
         request = self._haiku_request(reasoning_effort="high")
 
@@ -2184,7 +2336,7 @@ class TestOpenAIUnsupportedNativeReasoningModels:
 
         assert payload["additionalModelRequestFields"] == {
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": "xhigh"},
+            "output_config": {"effort": "high"},
         }
 
     def test_disabled_reasoning_stays_disabled(self):

@@ -20,11 +20,102 @@ from kiro.model_capabilities import (
     MODEL_SOURCE_KEY,
     MODEL_SOURCE_STATIC,
     NATIVE_REASONING_SCHEMA_KEY,
-    STATIC_NATIVE_REASONING_MODELS,
+    get_native_effort_spec,
+    get_native_reasoning_efforts,
     is_dynamic_metadata,
     parse_native_reasoning_schema,
     resolve_native_reasoning_format,
 )
+
+# Verbatim ListAvailableModels payloads captured from the live Kiro API. These
+# are the contract the gateway must follow, so the tests assert against them
+# instead of against locally invented model tables.
+OFFICIAL_FOUR_LEVEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "thinking": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["adaptive", "disabled"]},
+                "display": {"type": "string", "enum": ["summarized", "omitted"]},
+            },
+            "required": ["type"],
+        },
+        "output_config": {
+            "type": "object",
+            "properties": {
+                "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "max"],
+                    "default": "high",
+                }
+            },
+        },
+        "max_tokens": {"type": "integer", "minimum": 1024, "maximum": 64000},
+    },
+    "additionalProperties": False,
+}
+
+OFFICIAL_FIVE_LEVEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "thinking": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["adaptive", "disabled"]},
+                "display": {"type": "string", "enum": ["summarized", "omitted"]},
+            },
+            "required": ["type"],
+        },
+        "output_config": {
+            "type": "object",
+            "properties": {
+                "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "xhigh", "max"],
+                    "default": "high",
+                }
+            },
+        },
+        "max_tokens": {"type": "integer", "minimum": 1024, "maximum": 128000},
+    },
+    "additionalProperties": False,
+}
+
+OFFICIAL_FIVE_LEVEL_SCHEMA_XHIGH_DEFAULT = {
+    "type": "object",
+    "properties": {
+        "output_config": {
+            "type": "object",
+            "properties": {
+                "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "xhigh", "max"],
+                    "default": "xhigh",
+                }
+            },
+        }
+    },
+    "additionalProperties": False,
+}
+
+OFFICIAL_GPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["standard", "pro"], "default": "standard"},
+                "effort": {
+                    "type": "string",
+                    "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "default": "high",
+                },
+            },
+        }
+    },
+    "additionalProperties": False,
+}
 
 
 def _dynamic(schema=..., **extra):
@@ -234,29 +325,27 @@ class TestResolveNativeReasoningFormatDynamic:
 
 
 class TestResolveNativeReasoningFormatStatic:
-    """Static/hidden/pass-through models use the explicit whitelist only."""
+    """Anything not carrying official metadata must resolve to unsupported."""
 
-    def test_haiku_is_not_whitelisted(self):
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "claude-opus-4.8",
+            "gpt-5.6-sol",
+            "claude-haiku-4.5",
+            "claude-sonnet-4",
+            "auto",
+            "deepseek-3.2",
+            "totally-unknown-model",
+            "",
+        ],
+    )
+    def test_no_metadata_means_no_native_reasoning(self, model_id):
         """
-        What it does: Resolves claude-haiku-4.5 with no metadata at all.
-        Purpose: Offline FALLBACK_MODELS mode must not claim effort support.
+        What it does: Resolves every kind of model id with no metadata at all.
+        Purpose: Capability must come from the official schema, never a name.
         """
-        assert resolve_native_reasoning_format("claude-haiku-4.5", None) is None
-        assert "claude-haiku-4.5" not in STATIC_NATIVE_REASONING_MODELS
-
-    def test_whitelisted_claude_model_uses_output_config(self):
-        """
-        What it does: Resolves a whitelisted Claude model without metadata.
-        Purpose: Offline mode keeps working for verified models.
-        """
-        assert resolve_native_reasoning_format("claude-opus-4.8", None) == "output_config"
-
-    def test_whitelisted_gpt_model_uses_reasoning(self):
-        """
-        What it does: Resolves a whitelisted GPT model without metadata.
-        Purpose: GPT-style protocol survives the offline path.
-        """
-        assert resolve_native_reasoning_format("gpt-5.6-sol", None) == "reasoning"
+        assert resolve_native_reasoning_format(model_id, None) is None
 
     def test_static_marker_ignores_any_attached_schema(self):
         """
@@ -264,49 +353,11 @@ class TestResolveNativeReasoningFormatStatic:
         Purpose: A locally fabricated schema must not grant capabilities.
         """
         info = {
-            "modelId": "claude-haiku-4.5",
+            "modelId": "claude-opus-4.8",
             MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
-            NATIVE_REASONING_SCHEMA_KEY: {"properties": {"output_config": {}}},
+            NATIVE_REASONING_SCHEMA_KEY: OFFICIAL_FIVE_LEVEL_SCHEMA,
         }
-        assert resolve_native_reasoning_format("claude-haiku-4.5", info) is None
-
-    @pytest.mark.parametrize(
-        "client_name",
-        [
-            "claude-opus-4-8",
-            "claude-opus-4-8-20251001",
-            "claude-opus-4.8[1m]",
-            "CLAUDE-OPUS-4-8",
-        ],
-    )
-    def test_whitelist_lookup_normalizes_client_names(self, client_name):
-        """
-        What it does: Resolves client-side spellings of a whitelisted model.
-        Purpose: Capability must not depend on which name format a client sends.
-        """
-        assert resolve_native_reasoning_format(client_name, None) == "output_config"
-
-    @pytest.mark.parametrize(
-        "model_id",
-        [
-            "claude-haiku-4.5",
-            "claude-haiku-4-5",
-            "claude-sonnet-4",
-            "auto",
-            "deepseek-3.2",
-            "glm-5",
-            "minimax-m2.5",
-            "qwen3-coder-next",
-            "totally-unknown-model",
-            "",
-        ],
-    )
-    def test_unverified_models_get_no_native_reasoning(self, model_id):
-        """
-        What it does: Resolves models absent from the whitelist.
-        Purpose: Broad family guessing stays gone; unknown means unsupported.
-        """
-        assert resolve_native_reasoning_format(model_id, None) is None
+        assert resolve_native_reasoning_format("claude-opus-4.8", info) is None
 
     @pytest.mark.parametrize("model_id", [None, 42, [], {}])
     def test_non_string_model_id_is_safe(self, model_id):
@@ -316,58 +367,217 @@ class TestResolveNativeReasoningFormatStatic:
         """
         assert resolve_native_reasoning_format(model_id, None) is None
 
-    def test_alias_inherits_target_from_static_metadata(self):
+    def test_alias_uses_official_schema_of_its_cache_entry(self):
         """
-        What it does: Resolves an alias whose static cache entry is its target.
-        Purpose: In offline mode an alias must inherit the target's capability,
-                 not be judged by the alias display name (which is never listed).
+        What it does: Resolves an alias whose cached entry is the real target.
+        Purpose: Aliases inherit capability from official data, not their name.
+        """
+        info = _dynamic(schema=OFFICIAL_FIVE_LEVEL_SCHEMA, modelId="claude-opus-4.8")
+        assert resolve_native_reasoning_format("my-opus", info) == "output_config"
+
+    def test_alias_without_official_schema_stays_unsupported(self):
+        """
+        What it does: Resolves an alias whose target advertises no schema.
+        Purpose: Alias indirection must never invent a capability.
+        """
+        info = _dynamic(schema=None, modelId="claude-haiku-4.5")
+        assert resolve_native_reasoning_format("my-haiku", info) is None
+
+
+# ==================================================================================================
+# Tests for the official effort enum readers
+# ==================================================================================================
+
+class TestGetNativeEffortSpec:
+    """
+    The effort enum must be read verbatim from official model metadata.
+
+    The enums below are the real ListAvailableModels payloads: Claude 4.6
+    advertises four values, Claude 4.7/4.8/5 advertise five (including xhigh),
+    and the gpt-5.6 family advertises six (including none).
+    """
+
+    @pytest.mark.parametrize(
+        ("model_id", "schema", "expected_values", "expected_default"),
+        [
+            (
+                "claude-opus-4.6",
+                OFFICIAL_FOUR_LEVEL_SCHEMA,
+                ("low", "medium", "high", "max"),
+                "high",
+            ),
+            (
+                "claude-opus-4.7",
+                OFFICIAL_FIVE_LEVEL_SCHEMA_XHIGH_DEFAULT,
+                ("low", "medium", "high", "xhigh", "max"),
+                "xhigh",
+            ),
+            (
+                "claude-opus-4.8",
+                OFFICIAL_FIVE_LEVEL_SCHEMA,
+                ("low", "medium", "high", "xhigh", "max"),
+                "high",
+            ),
+            (
+                "gpt-5.6-sol",
+                OFFICIAL_GPT_SCHEMA,
+                ("none", "low", "medium", "high", "xhigh", "max"),
+                "high",
+            ),
+        ],
+    )
+    def test_reads_official_enum_and_default_verbatim(
+        self, model_id, schema, expected_values, expected_default
+    ):
+        """
+        What it does: Parses each real official schema shape.
+        Purpose: Order, membership and default must survive untouched.
+        """
+        spec = get_native_effort_spec(model_id, _dynamic(schema=schema, modelId=model_id))
+
+        assert spec.values == expected_values
+        assert spec.default == expected_default
+        assert get_native_reasoning_efforts(model_id, _dynamic(schema=schema)) == frozenset(
+            expected_values
+        )
+
+    def test_json_string_schema_is_supported(self):
+        """
+        What it does: Supplies the official schema as a JSON string.
+        Purpose: AWS returns this field encoded in some responses.
+        """
+        info = _dynamic(schema=json.dumps(OFFICIAL_FOUR_LEVEL_SCHEMA))
+        spec = get_native_effort_spec("claude-opus-4.6", info)
+
+        assert spec.values == ("low", "medium", "high", "max")
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["claude-opus-4.6", "claude-opus-4.8", "gpt-5.6-sol", "unknown-model"],
+    )
+    def test_absent_metadata_yields_no_effort_spec(self, model_id):
+        """
+        What it does: Requests an effort spec with no official metadata.
+        Purpose: Without official data the gateway must claim nothing.
+        """
+        assert get_native_effort_spec(model_id, None) is None
+        assert get_native_reasoning_efforts(model_id, None) is None
+
+    def test_static_metadata_is_never_trusted(self):
+        """
+        What it does: Attaches a real schema to a static cache entry.
+        Purpose: Only ListAvailableModels data may define capabilities.
         """
         info = {
             "modelId": "claude-opus-4.8",
             MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
+            NATIVE_REASONING_SCHEMA_KEY: OFFICIAL_FIVE_LEVEL_SCHEMA,
         }
-        assert resolve_native_reasoning_format("my-opus", info) == "output_config"
+        assert get_native_effort_spec("claude-opus-4.8", info) is None
 
-    def test_alias_to_unsupported_target_stays_unsupported(self):
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            None,
+            {},
+            {"properties": {}},
+            {"properties": {"output_config": {}}},
+            {"properties": {"output_config": {"properties": {}}}},
+            {"properties": {"output_config": {"properties": {"effort": {}}}}},
+            {"properties": {"output_config": {"properties": {"effort": {"enum": []}}}}},
+            {
+                "properties": {
+                    "output_config": {"properties": {"effort": {"enum": ["high", 1]}}}
+                }
+            },
+            {
+                "properties": {
+                    "output_config": {"properties": {"effort": {"enum": ["", "high"]}}}
+                }
+            },
+            "not json",
+            '{"properties": {"output_config": {}}',
+            [],
+            42,
+        ],
+    )
+    def test_unusable_schema_yields_no_effort_spec(self, schema):
         """
-        What it does: Resolves an alias pointing at a non-whitelisted target.
-        Purpose: Alias indirection must never upgrade an unsupported model.
+        What it does: Feeds malformed or incomplete schemas to the reader.
+        Purpose: Fail closed rather than inventing an effort vocabulary.
         """
-        info = {
-            "modelId": "claude-haiku-4.5",
-            MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC,
+        assert get_native_effort_spec("claude-opus-4.8", _dynamic(schema=schema)) is None
+
+    def test_default_outside_enum_is_discarded(self):
+        """
+        What it does: Parses a schema whose default is not in its own enum.
+        Purpose: A contradictory default must not become a usable value.
+        """
+        schema = {
+            "properties": {
+                "output_config": {
+                    "properties": {
+                        "effort": {"enum": ["low", "high"], "default": "xhigh"}
+                    }
+                }
+            }
         }
-        assert resolve_native_reasoning_format("my-haiku", info) is None
+        spec = get_native_effort_spec("claude-test", _dynamic(schema=schema))
 
-    def test_static_metadata_without_model_id_falls_back_to_argument(self):
+        assert spec.values == ("low", "high")
+        assert spec.default is None
+
+    def test_gpt_effort_is_read_from_the_reasoning_container(self):
         """
-        What it does: Resolves static metadata missing its modelId key.
-        Purpose: A partial cache entry must not lose the caller's model id.
+        What it does: Parses the official gpt-5.6 reasoning container.
+        Purpose: The enum lives under a different key for GPT-style models.
         """
-        info = {MODEL_SOURCE_KEY: MODEL_SOURCE_STATIC}
-        assert resolve_native_reasoning_format("claude-opus-4.8", info) == "output_config"
-        assert resolve_native_reasoning_format("claude-haiku-4.5", info) is None
+        info = _dynamic(schema=OFFICIAL_GPT_SCHEMA, modelId="gpt-5.6-luna")
+
+        assert get_native_effort_spec("gpt-5.6-luna", info).values[0] == "none"
 
 
-class TestStaticWhitelistIntegrity:
-    """Guardrails on the whitelist table itself."""
+class TestNoModelNamesAreHardcoded:
+    """
+    Capability decisions must never be keyed on model names or versions.
 
-    def test_all_values_are_known_formats(self):
-        """
-        What it does: Checks every whitelist value.
-        Purpose: A typo would silently produce an invalid payload key.
-        """
-        assert set(STATIC_NATIVE_REASONING_MODELS.values()) <= {
-            "reasoning",
-            "output_config",
-        }
+    Regression: a 4.6-specific table produced correct behaviour for 4.6 while
+    silently degrading, or wrongly trusting, every other model.
+    """
 
-    def test_keys_are_normalized_ids(self):
+    def test_module_has_no_model_specific_tables(self):
         """
-        What it does: Checks whitelist keys survive normalization unchanged.
-        Purpose: A non-normalized key would never be matched at lookup time.
+        What it does: Inspects the module for model-keyed capability tables.
+        Purpose: Official metadata is the only permitted source.
         """
-        from kiro.model_resolver import normalize_model_name
+        import kiro.model_capabilities as capabilities
 
-        for model_id in STATIC_NATIVE_REASONING_MODELS:
-            assert normalize_model_name(model_id) == model_id
+        assert not hasattr(capabilities, "STATIC_NATIVE_REASONING_MODELS")
+        assert not hasattr(capabilities, "STATIC_NATIVE_REASONING_EFFORTS")
+
+    def test_capability_source_files_do_not_mention_model_versions(self):
+        """
+        What it does: Greps the capability and conversion modules for versions.
+        Purpose: A version literal is how the hardcoding regression returns.
+        """
+        import re
+        from pathlib import Path
+
+        import kiro.converters_core as converters_core
+        import kiro.model_capabilities as capabilities
+        import kiro.routes_openai as routes_openai
+
+        version_pattern = re.compile(r"(claude|gpt)-[a-z0-9.\-]*\d", re.IGNORECASE)
+        for module in (capabilities, converters_core, routes_openai):
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            code_only = "\n".join(
+                line for line in source.splitlines() if not line.strip().startswith("#")
+            )
+            for match in version_pattern.finditer(code_only):
+                # Docstrings may reference models; executable logic may not.
+                line = code_only[
+                    code_only.rfind("\n", 0, match.start()) + 1 : match.end()
+                ]
+                assert '"' in line or "'" not in line, (
+                    f"{module.__name__} appears to branch on model name: {line!r}"
+                )

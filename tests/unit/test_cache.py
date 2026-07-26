@@ -448,8 +448,8 @@ class TestModelInfoCacheMetadataProvenance:
     Tests for the metadata provenance marker.
 
     Capability detection needs to know whether a cache entry came from AWS
-    ListAvailableModels (its additionalModelRequestFieldsSchema is the contract)
-    or from a local static list (no schema exists, whitelist only).
+    ListAvailableModels (its additionalModelRequestFieldsSchema is authoritative)
+    or from a local static list (which must never grant native capabilities).
     """
 
     @pytest.mark.asyncio
