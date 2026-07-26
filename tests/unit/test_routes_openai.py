@@ -380,49 +380,24 @@ class TestModelsEndpoint:
         for model in response.json()["data"]:
             assert model["owned_by"] == "anthropic"
 
-    def test_models_advertise_kiro_effort_labels_to_grok(self, test_client, valid_proxy_api_key):
-        """Native reasoning models should display Kiro effort names in Grok."""
+    def test_effort_advertisement_requires_official_metadata(
+        self, test_client, valid_proxy_api_key
+    ):
+        """
+        What it does: Lists models while the official model list is unreachable,
+                      so every cache entry comes from the static fallback list.
+        Purpose: Effort levels may only be advertised from official metadata, so
+                 an offline gateway advertises none rather than guessing.
+        """
         response = test_client.get(
             "/v1/models",
             headers={"Authorization": f"Bearer {valid_proxy_api_key}"},
         )
 
         assert response.status_code == 200
-        native_models = [
-            model
-            for model in response.json()["data"]
-            if model["supportsReasoningEffort"]
-        ]
-        assert native_models
-
-        for model in native_models:
-            options = model["reasoningEfforts"]
-            # Strongest first: the client renders the picker in list order.
-            assert [option["id"] for option in options] == [
-                "max",
-                "xhigh",
-                "high",
-                "medium",
-                "low",
-                "none",
-            ]
-            assert [option["label"] for option in options] == [
-                "Max",
-                "xHigh",
-                "High",
-                "Medium",
-                "Low",
-                "None",
-            ]
-            # Kiro id -> Grok value rank pairing must survive the reordering.
-            assert [option["value"] for option in options] == [
-                "xhigh",
-                "high",
-                "medium",
-                "low",
-                "minimal",
-                "none",
-            ]
+        for model in response.json()["data"]:
+            assert model["supportsReasoningEffort"] is False
+            assert model["reasoningEfforts"] == []
 
 
 class TestModelsEndpointReasoningCapabilityAdvertisement:
@@ -440,16 +415,61 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
         "modelName": "Claude Haiku 4.5",
         "tokenLimits": {"maxInputTokens": 200000},
     }
+    # Verbatim official schemas: the four-level model omits xhigh, the
+    # five-level model includes it, and the GPT-style model also exposes none.
+    FOUR_LEVEL_METADATA = {
+        "modelId": "claude-opus-4.6",
+        "additionalModelRequestFieldsSchema": {
+            "properties": {
+                "output_config": {
+                    "properties": {
+                        "effort": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "max"],
+                            "default": "high",
+                        }
+                    }
+                }
+            }
+        },
+    }
     OPUS_METADATA = {
         "modelId": "claude-opus-4.8",
         "additionalModelRequestFieldsSchema": {
-            "properties": {"output_config": {"type": "object"}}
+            "properties": {
+                "output_config": {
+                    "properties": {
+                        "effort": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "xhigh", "max"],
+                            "default": "high",
+                        }
+                    }
+                }
+            }
         },
     }
     GPT_METADATA = {
         "modelId": "gpt-5.6-sol",
         "additionalModelRequestFieldsSchema": {
-            "properties": {"reasoning": {"type": "object"}}
+            "properties": {
+                "reasoning": {
+                    "properties": {
+                        "effort": {
+                            "type": "string",
+                            "enum": [
+                                "none",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max",
+                            ],
+                            "default": "high",
+                        }
+                    }
+                }
+            }
         },
     }
 
@@ -512,18 +532,68 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
         )
 
         assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
-        for model_id in ("claude-opus-4.8", "gpt-5.6-sol"):
-            assert entries[model_id]["supportsReasoningEffort"] is True
-            assert len(entries[model_id]["reasoningEfforts"]) == 6
+        assert entries["claude-opus-4.8"]["supportsReasoningEffort"] is True
+        assert len(entries["claude-opus-4.8"]["reasoningEfforts"]) == 5
+        assert entries["gpt-5.6-sol"]["supportsReasoningEffort"] is True
+        assert len(entries["gpt-5.6-sol"]["reasoningEfforts"]) == 6
+
+    def test_advertised_efforts_mirror_each_official_enum(self):
+        """
+        What it does: Advertises three models whose official enums differ in
+                      length (four, five and six values).
+        Purpose: The picker must expose exactly the official values per model,
+                 so a model that omits xhigh never shows it and a model that
+                 offers it never loses it.
+        """
+        entries = self._entries(
+            {
+                "claude-opus-4.6": self.FOUR_LEVEL_METADATA,
+                "claude-opus-4.8": self.OPUS_METADATA,
+                "gpt-5.6-sol": self.GPT_METADATA,
+            }
+        )
+
+        assert [
+            option["id"] for option in entries["claude-opus-4.6"]["reasoningEfforts"]
+        ] == ["max", "high", "medium", "low"]
+        assert [
+            option["id"] for option in entries["claude-opus-4.8"]["reasoningEfforts"]
+        ] == ["max", "xhigh", "high", "medium", "low"]
+        assert [
+            option["id"] for option in entries["gpt-5.6-sol"]["reasoningEfforts"]
+        ] == ["max", "xhigh", "high", "medium", "low", "none"]
+
+    def test_advertised_ids_and_values_match_official_names(self):
+        """
+        What it does: Reads one model's advertised option objects.
+        Purpose: Kiro's own value names are sent back unchanged, so the client's
+                 selection is already a value the official enum accepts.
+        """
+        entries = self._entries({"claude-opus-4.8": self.OPUS_METADATA})
+        options = entries["claude-opus-4.8"]["reasoningEfforts"]
+
+        assert [(option["id"], option["value"]) for option in options] == [
+            ("max", "max"),
+            ("xhigh", "xhigh"),
+            ("high", "high"),
+            ("medium", "medium"),
+            ("low", "low"),
+        ]
+        assert [option["label"] for option in options] == [
+            "Max",
+            "xHigh",
+            "High",
+            "Medium",
+            "Low",
+        ]
 
     def test_effort_options_are_ordered_strongest_first(self):
         """
         What it does: Reads the serialized reasoningEfforts array straight off a
                       real /v1/models response for schema-backed models.
-        Purpose: The client renders the picker in list order, so the advertised
-                 order must be strictly Max -> None. Asserted as whole lists so a
-                 single swapped entry fails, and per-entry so the Kiro id -> Grok
-                 value rank pairing cannot silently shift with the reordering.
+        Purpose: The client renders the picker in list order, so the strongest
+                 official value must come first regardless of the order AWS used
+                 inside its enum (which is weakest-first).
         """
         entries = self._entries(
             {
@@ -533,43 +603,32 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
             }
         )
 
-        expected = [
-            ("max", "xhigh", "Max"),
-            ("xhigh", "high", "xHigh"),
-            ("high", "medium", "High"),
-            ("medium", "low", "Medium"),
-            ("low", "minimal", "Low"),
-            ("none", "none", "None"),
-        ]
-
-        for model_id in ("claude-opus-4.8", "gpt-5.6-sol"):
-            options = entries[model_id]["reasoningEfforts"]
-
-            assert [option["id"] for option in options] == [e[0] for e in expected]
-            assert [option["value"] for option in options] == [e[1] for e in expected]
-            assert [option["label"] for option in options] == [e[2] for e in expected]
-            # Pairings travel together: id/value/label of each row must match.
-            assert [
-                (option["id"], option["value"], option["label"]) for option in options
-            ] == expected
+        assert [
+            option["id"] for option in entries["claude-opus-4.8"]["reasoningEfforts"]
+        ] == ["max", "xhigh", "high", "medium", "low"]
+        assert [
+            option["id"] for option in entries["gpt-5.6-sol"]["reasoningEfforts"]
+        ] == ["max", "xhigh", "high", "medium", "low", "none"]
 
         # Unsupported model advertises nothing at all, in any order.
         assert entries["claude-haiku-4.5"]["reasoningEfforts"] == []
 
-    def test_effort_options_constant_is_not_runtime_sorted(self):
+    def test_advertised_options_are_a_subset_of_the_official_enum(self):
         """
-        What it does: Compares the served order with the module constant order.
-        Purpose: The literal constant is the source of order; nothing may sort or
-                 reverse it on the way out.
+        What it does: Compares the advertised ids with the model's own schema.
+        Purpose: The endpoint must never surface a value AWS did not list.
         """
-        from kiro.routes_openai import KIRO_REASONING_EFFORT_OPTIONS
+        for metadata in (self.FOUR_LEVEL_METADATA, self.OPUS_METADATA, self.GPT_METADATA):
+            model_id = metadata["modelId"]
+            official = set(
+                metadata["additionalModelRequestFieldsSchema"]["properties"]
+                .get("output_config", metadata["additionalModelRequestFieldsSchema"]["properties"].get("reasoning"))
+                ["properties"]["effort"]["enum"]
+            )
+            entries = self._entries({model_id: metadata})
+            served = {option["id"] for option in entries[model_id]["reasoningEfforts"]}
 
-        entries = self._entries({"claude-opus-4.8": self.OPUS_METADATA})
-        served_ids = [
-            option["id"] for option in entries["claude-opus-4.8"]["reasoningEfforts"]
-        ]
-
-        assert served_ids == [option.id for option in KIRO_REASONING_EFFORT_OPTIONS]
+            assert served == official, f"{model_id} advertised {served}, official {official}"
 
     def test_account_system_mode_uses_same_capability_source(self):
         """
@@ -587,25 +646,24 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
         assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
         assert entries["claude-opus-4.8"]["supportsReasoningEffort"] is True
 
-    def test_models_without_metadata_use_static_whitelist(self):
+    def test_models_without_metadata_advertise_no_effort(self):
         """
         What it does: Lists models when no metadata is available (offline mode).
-        Purpose: FALLBACK_MODELS must rely on the explicit whitelist only, and
-                 Haiku is deliberately absent from it.
+        Purpose: Without official data, no model may claim effort support.
         """
         entries = self._entries(
             {"claude-haiku-4.5": None, "claude-opus-4.8": None, "deepseek-3.2": None}
         )
 
-        assert entries["claude-haiku-4.5"]["supportsReasoningEffort"] is False
-        assert entries["deepseek-3.2"]["supportsReasoningEffort"] is False
-        assert entries["claude-opus-4.8"]["supportsReasoningEffort"] is True
+        for model_id in ("claude-haiku-4.5", "claude-opus-4.8", "deepseek-3.2"):
+            assert entries[model_id]["supportsReasoningEffort"] is False
+            assert entries[model_id]["reasoningEfforts"] == []
 
     def test_alias_inherits_target_capability(self):
         """
         What it does: Advertises aliases whose metadata comes from their targets.
         Purpose: Aliases never appear in the Kiro cache under their own name, so
-                 they must be judged by the resolved target's metadata.
+                 they must be judged by the resolved target's official metadata.
         """
         entries = self._entries(
             {
@@ -615,12 +673,15 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
         )
 
         assert entries["my-opus"]["supportsReasoningEffort"] is True
+        assert [
+            option["id"] for option in entries["my-opus"]["reasoningEfforts"]
+        ] == ["max", "xhigh", "high", "medium", "low"]
         assert entries["my-haiku"]["supportsReasoningEffort"] is False
 
-    def test_alias_inherits_target_capability_offline(self):
+    def test_alias_without_official_metadata_advertises_no_effort(self):
         """
         What it does: Same alias check with static (schema-less) metadata.
-        Purpose: Offline mode resolves the whitelist against the target id.
+        Purpose: Offline aliases must not inherit a guessed capability.
         """
         from kiro.model_capabilities import MODEL_SOURCE_KEY, MODEL_SOURCE_STATIC
 
@@ -637,7 +698,7 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
             }
         )
 
-        assert entries["my-opus"]["supportsReasoningEffort"] is True
+        assert entries["my-opus"]["supportsReasoningEffort"] is False
         assert entries["my-haiku"]["supportsReasoningEffort"] is False
 
     def test_advertisement_matches_converter_payload(self):
@@ -674,7 +735,7 @@ class TestModelsEndpointReasoningCapabilityAdvertisement:
         """
         What it does: Uses an account manager without get_model_metadata.
         Purpose: Legacy/stubbed managers must still serve the list, falling back
-                 to the conservative whitelist decision.
+                 to advertising no effort support at all.
         """
         from fastapi import FastAPI
 

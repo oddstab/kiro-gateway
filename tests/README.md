@@ -90,7 +90,7 @@ tests/
 │   ├── test_main_lifespan.py       # Application lifespan tests (Account System initialization, legacy migration, background tasks)
 │   ├── test_web_search_provider.py  # Configured web-search provider dispatch (Kiro MCP vs DuckDuckGo)
 │   ├── test_web_search_duckduckgo.py # DuckDuckGo provider result normalization and failures
-│   ├── test_model_capabilities.py  # Native reasoning capability detection (AWS additionalModelRequestFieldsSchema authority, static whitelist, fail-closed)
+│   ├── test_model_capabilities.py  # Native reasoning capability detection (official AWS schema authority, exact per-model effort enums, fail-closed)
 │   ├── test_model_resolver.py      # Dynamic Model Resolution System tests
 │   ├── test_models_anthropic.py    # Anthropic Pydantic models tests (all content blocks, tools, streaming, server-side tools)
 │   ├── test_models_openai.py       # OpenAI Pydantic models tests (messages, tools, responses, streaming)

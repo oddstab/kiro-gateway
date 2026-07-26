@@ -25,28 +25,25 @@ Both the /v1/models advertisement (what the client UI shows) and the request
 converters (what we actually send upstream) resolve capabilities through this
 module, so the advertised metadata can never drift from runtime behaviour.
 
-Capability resolution is provenance aware:
+Capability resolution is schema-only:
 
-- Dynamic models (from ListAvailableModels) are decided **only** by their
-  ``additionalModelRequestFieldsSchema``. That schema is AWS's own contract and
-  is therefore authoritative: a missing, null, empty, malformed or unrelated
-  schema means "no native reasoning" (fail closed). Model-name family guessing
-  is never applied here, because guessing is exactly what made Kiro Gateway
-  send ``additionalModelRequestFields`` to claude-haiku-4.5 and get
-  ``400 additionalModelRequestFields is not supported for this model
-  (REQUEST_BODY_INVALID)``.
-- Static models (FALLBACK_MODELS when ListAvailableModels is unreachable, plus
-  hidden/manually configured models) carry no AWS schema at all. For those the
-  only permitted source is the explicit whitelist below. Anything not listed is
-  treated as unsupported.
+- Models returned by ``ListAvailableModels`` are decided **only** by their
+  ``additionalModelRequestFieldsSchema``. That schema is AWS's contract and is
+  authoritative for both the native request shape and each model's exact
+  ``effort`` enum.
+- Missing, null, empty, malformed, unrelated, or locally fabricated schemas
+  mean "no native reasoning effort" (fail closed). Static fallback and hidden
+  model entries never infer capabilities from a model name.
+
+This prevents the gateway from sending values that one model rejects merely
+because another model in the same family accepts them.
 """
 
 import json
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 from loguru import logger
-
-from kiro.model_resolver import normalize_model_name
 
 # ==================================================================================================
 # Native Reasoning Formats
@@ -74,50 +71,26 @@ _SCHEMA_PROPERTY_TO_FORMAT = (
 # Metadata Provenance
 # ==================================================================================================
 
-# Marker injected by ModelInfoCache so capability resolution can tell AWS
-# metadata apart from locally configured entries.
+# Marker injected by ModelInfoCache. Only dynamic entries originate from the
+# official ListAvailableModels response and may grant native capabilities.
 MODEL_SOURCE_KEY: str = "_metadata_source"
-
-# Metadata came from ListAvailableModels -> its schema is authoritative.
 MODEL_SOURCE_DYNAMIC: str = "dynamic"
-
-# Metadata came from FALLBACK_MODELS / HIDDEN_MODELS -> whitelist only.
 MODEL_SOURCE_STATIC: str = "static"
 
-# ==================================================================================================
-# Static Capability Whitelist
-# ==================================================================================================
 
-# Native reasoning support for models with no AWS metadata (offline fallback
-# list, hidden models, unknown pass-through ids).
-#
-# Rules for this table:
-# - Keys are normalized Kiro model ids (dot format, see normalize_model_name).
-# - Entries are explicit. No families, no prefixes, no "claude means Claude
-#   style" heuristics. A model absent from this table gets no native reasoning
-#   fields, which is always safe: the prompt-based fake reasoning fallback still
-#   provides reasoning when FAKE_REASONING is enabled.
-# - Deliberately absent: claude-haiku-4.5 (AWS rejects
-#   additionalModelRequestFields for it), claude-sonnet-4, auto, and the
-#   non-Anthropic models (deepseek/glm/minimax/qwen) whose schemas we have not
-#   verified.
-# - When ListAvailableModels is reachable this table is irrelevant: the AWS
-#   schema wins.
-STATIC_NATIVE_REASONING_MODELS: Dict[str, str] = {
-    # Claude models that accept {"thinking": ..., "output_config": ...}
-    "claude-sonnet-4.5": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-sonnet-4.6": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-sonnet-5": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-opus-4.5": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-opus-4.6": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-opus-4.7": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-opus-4.8": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    "claude-opus-5": NATIVE_REASONING_FORMAT_OUTPUT_CONFIG,
-    # GPT-5.6 family accepts {"reasoning": {...}}
-    "gpt-5.6-sol": NATIVE_REASONING_FORMAT_REASONING,
-    "gpt-5.6-terra": NATIVE_REASONING_FORMAT_REASONING,
-    "gpt-5.6-luna": NATIVE_REASONING_FORMAT_REASONING,
-}
+def _parse_schema_object(schema: Any) -> Optional[Dict[str, Any]]:
+    """Decode an AWS additional-model-fields schema into an object."""
+    if isinstance(schema, str):
+        try:
+            schema = json.loads(schema)
+        except json.JSONDecodeError:
+            logger.warning(
+                f"Ignoring invalid {NATIVE_REASONING_SCHEMA_KEY} JSON: "
+                "treating model as not supporting native reasoning"
+            )
+            return None
+
+    return schema if isinstance(schema, dict) else None
 
 
 def parse_native_reasoning_schema(schema: Any) -> Optional[str]:
@@ -143,20 +116,11 @@ def parse_native_reasoning_schema(schema: Any) -> Optional[str]:
         >>> parse_native_reasoning_schema("not json") is None
         True
     """
-    if isinstance(schema, str):
-        try:
-            schema = json.loads(schema)
-        except json.JSONDecodeError:
-            logger.warning(
-                f"Ignoring invalid {NATIVE_REASONING_SCHEMA_KEY} JSON: "
-                "treating model as not supporting native reasoning"
-            )
-            return None
-
-    if not isinstance(schema, dict):
+    schema_object = _parse_schema_object(schema)
+    if schema_object is None:
         return None
 
-    properties = schema.get("properties")
+    properties = schema_object.get("properties")
     if not isinstance(properties, dict):
         return None
 
@@ -171,9 +135,9 @@ def is_dynamic_metadata(model_info: Optional[Dict[str, Any]]) -> bool:
     """
     Check whether metadata came from AWS ListAvailableModels.
 
-    Unmarked metadata is treated as dynamic on purpose: dynamic handling is the
-    strict one (schema or nothing), so an unknown provenance can never unlock
-    native reasoning by accident.
+    Entries explicitly tagged static are never trusted. Untagged metadata is
+    treated as dynamic because dynamic handling is the strict path: an official
+    schema is still required before any capability is granted.
 
     Args:
         model_info: Model metadata dict, or None.
@@ -191,53 +155,125 @@ def resolve_native_reasoning_format(
     model_info: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
-    Resolve the native reasoning protocol for a model.
-
-    This is the only place allowed to answer that question. It is used both by
-    the /v1/models capability advertisement and by the OpenAI/Anthropic request
-    converters (streaming and non-streaming), so the UI and the upstream
-    payload can never disagree.
+    Resolve the native reasoning protocol from official model metadata.
 
     Args:
-        model_id: Resolved Kiro model id (aliases must already be resolved by
-            the caller so a model inherits its target's capabilities).
-        model_info: Metadata for that model, when available.
+        model_id: Resolved Kiro model id, used only for diagnostics.
+        model_info: Metadata cached from ListAvailableModels.
 
     Returns:
-        "reasoning" for GPT-style additionalModelRequestFields, "output_config"
-        for Claude-style fields, or None when native reasoning must not be sent.
+        ``reasoning`` or ``output_config`` when the official schema advertises
+        that protocol; otherwise None.
     """
-    if is_dynamic_metadata(model_info):
-        # AWS metadata is the contract. No schema -> no native reasoning.
-        native_format = parse_native_reasoning_schema(
-            model_info.get(NATIVE_REASONING_SCHEMA_KEY)
+    if not is_dynamic_metadata(model_info):
+        logger.debug(
+            f"Model '{model_id}' has no official ListAvailableModels metadata: "
+            "native reasoning disabled"
         )
-        if native_format is None:
-            logger.debug(
-                f"Model '{model_id}' has no {NATIVE_REASONING_SCHEMA_KEY} entry for "
-                "reasoning/output_config: native reasoning disabled"
-            )
-        return native_format
-
-    # Static/hidden/pass-through model: explicit whitelist only.
-    #
-    # Prefer the cached entry's modelId over the caller-supplied id. For an alias
-    # (grok-* etc.) the cache entry is the alias *target*, so this is what makes
-    # an alias inherit its target's capability in offline mode instead of being
-    # judged by its own display name.
-    lookup_id = model_id
-    if isinstance(model_info, dict):
-        cached_id = model_info.get("modelId")
-        if isinstance(cached_id, str) and cached_id:
-            lookup_id = cached_id
-
-    if not isinstance(lookup_id, str) or not lookup_id:
         return None
 
-    native_format = STATIC_NATIVE_REASONING_MODELS.get(normalize_model_name(lookup_id))
+    native_format = parse_native_reasoning_schema(
+        model_info.get(NATIVE_REASONING_SCHEMA_KEY)
+    )
     if native_format is None:
         logger.debug(
-            f"Model '{lookup_id}' has no AWS metadata and is not in the static "
-            "native reasoning whitelist: native reasoning disabled"
+            f"Model '{model_id}' has no {NATIVE_REASONING_SCHEMA_KEY} entry for "
+            "reasoning/output_config: native reasoning disabled"
         )
     return native_format
+
+
+@dataclass(frozen=True)
+class NativeEffortSpec:
+    """
+    One model's official reasoning effort contract.
+
+    Attributes:
+        values: Effort values in the exact order AWS advertises them.
+        default: The schema's own ``default`` value, when present.
+    """
+
+    values: Tuple[str, ...]
+    default: Optional[str] = None
+
+    @property
+    def value_set(self) -> FrozenSet[str]:
+        """Return the accepted effort values as a set."""
+        return frozenset(self.values)
+
+
+def get_native_effort_spec(
+    model_id: str,
+    model_info: Optional[Dict[str, Any]] = None,
+) -> Optional[NativeEffortSpec]:
+    """
+    Read one model's official effort enum out of its AWS schema.
+
+    Args:
+        model_id: Resolved Kiro model id, used only for diagnostics.
+        model_info: Metadata cached from ListAvailableModels.
+
+    Returns:
+        The official NativeEffortSpec, or None when AWS advertises no effort
+        enum for this model.
+    """
+    if not is_dynamic_metadata(model_info):
+        return None
+
+    schema = _parse_schema_object(model_info.get(NATIVE_REASONING_SCHEMA_KEY))
+    if schema is None:
+        return None
+
+    native_format = parse_native_reasoning_schema(schema)
+    properties = schema.get("properties")
+    container_schema = (
+        properties.get(native_format)
+        if isinstance(properties, dict) and native_format
+        else None
+    )
+    container_properties = (
+        container_schema.get("properties")
+        if isinstance(container_schema, dict)
+        else None
+    )
+    effort_schema = (
+        container_properties.get("effort")
+        if isinstance(container_properties, dict)
+        else None
+    )
+    if not isinstance(effort_schema, dict):
+        return None
+
+    effort_enum = effort_schema.get("enum")
+    if not isinstance(effort_enum, list) or not effort_enum:
+        return None
+    if not all(isinstance(value, str) and value for value in effort_enum):
+        logger.warning(
+            f"Model '{model_id}' advertises a non-string effort enum: "
+            "ignoring native effort support"
+        )
+        return None
+
+    default = effort_schema.get("default")
+    if not isinstance(default, str) or default not in effort_enum:
+        default = None
+
+    return NativeEffortSpec(values=tuple(effort_enum), default=default)
+
+
+def get_native_reasoning_efforts(
+    model_id: str,
+    model_info: Optional[Dict[str, Any]] = None,
+) -> Optional[FrozenSet[str]]:
+    """
+    Return the official effort values accepted by one model.
+
+    Args:
+        model_id: Resolved Kiro model id.
+        model_info: Metadata cached from ListAvailableModels.
+
+    Returns:
+        Accepted effort values, or None when AWS advertises no effort enum.
+    """
+    spec = get_native_effort_spec(model_id, model_info)
+    return spec.value_set if spec else None

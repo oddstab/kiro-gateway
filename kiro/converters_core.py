@@ -45,7 +45,10 @@ from kiro.config import (
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
 )
-from kiro.model_capabilities import resolve_native_reasoning_format
+from kiro.model_capabilities import (
+    get_native_effort_spec,
+    resolve_native_reasoning_format,
+)
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
@@ -161,21 +164,149 @@ def get_native_reasoning_format(
     return resolve_native_reasoning_format(model_id, model_info)
 
 
-def normalize_native_reasoning_effort(effort: Any) -> Any:
-    """Map OpenAI/Grok effort ranks to Kiro's native effort vocabulary."""
-    effort_map = {
-        "minimal": "low",
-        "low": "medium",
-        "medium": "high",
-        "high": "xhigh",
-        "xhigh": "max",
-    }
-    normalized = effort_map.get(effort, effort)
-    if normalized != effort:
-        logger.debug(
-            f"Mapped native reasoning effort: Grok/OpenAI {effort} -> Kiro {normalized}"
+# Every effort name Kiro or an OpenAI/Grok client may use, weakest to
+# strongest. This is a vocabulary for ordering values, not a per-model
+# capability list: which of these a model accepts always comes from that model's
+# official ListAvailableModels schema.
+EFFORT_RANK_ORDER: Tuple[str, ...] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
+# The effort scale Grok clients use, strongest first. Grok's vocabulary tops out
+# at "xhigh", so its values are paired rank-by-rank with whatever scale the
+# target model officially advertises.
+CLIENT_EFFORT_SCALE: Tuple[str, ...] = ("xhigh", "high", "medium", "low", "minimal")
+
+
+def _positive_official_values(spec: Any) -> List[str]:
+    """Return a model's official positive effort values, strongest first."""
+    return sorted(
+        (value for value in spec.values if value != "none"),
+        key=lambda value: EFFORT_RANK_ORDER.index(value)
+        if value in EFFORT_RANK_ORDER
+        else len(EFFORT_RANK_ORDER),
+        reverse=True,
+    )
+
+
+def map_client_effort_to_official(
+    effort: str,
+    official_values: List[str],
+) -> Optional[str]:
+    """
+    Pair a Grok effort value with a model's official effort value of equal rank.
+
+    Both scales are ordered strongest-first and matched position by position, so
+    a client's strongest choice always selects the model's strongest supported
+    level regardless of how many levels that model advertises. Requests weaker
+    than the model's shortest scale clamp to its weakest level.
+
+    Args:
+        effort: Grok effort value.
+        official_values: Official values, strongest first.
+
+    Returns:
+        The paired official value, or None when the input is not a Grok value.
+    """
+    if effort not in CLIENT_EFFORT_SCALE or not official_values:
+        return None
+    index = CLIENT_EFFORT_SCALE.index(effort)
+    return official_values[min(index, len(official_values) - 1)]
+
+
+def normalize_native_reasoning_effort(
+    effort: Any,
+    model_id: str = "",
+    model_info: Optional[Dict[str, Any]] = None,
+    *,
+    client_vocabulary: bool = False,
+) -> Any:
+    """
+    Resolve a requested effort against the target model's official enum.
+
+    Kiro publishes a per-model ``effort`` enum in its ListAvailableModels
+    schema and those enums differ between models, so this function never keys
+    off a model name. Values already present in the official enum are forwarded
+    untouched. Grok-vocabulary requests are paired by rank onto the model's own
+    scale, and native values missing from the enum clamp to the nearest
+    supported rank, preferring the stronger option on a tie.
+
+    Args:
+        effort: Requested effort value.
+        model_id: Resolved Kiro model ID.
+        model_info: ListAvailableModels metadata for that model.
+        client_vocabulary: True when the value came from a client's top-level
+            ``reasoning_effort`` field, which uses Grok's scale rather than
+            Kiro's own value names.
+
+    Returns:
+        An effort value the model officially accepts, the untouched value when
+        no official enum is published, or the original falsey value.
+
+    Raises:
+        ValueError: If the value is not an effort name at all.
+    """
+    if not effort or not isinstance(effort, str):
+        return effort
+
+    spec = get_native_effort_spec(model_id, model_info)
+    if spec is None:
+        # Kiro publishes no enum for this model: stay a gateway, not a
+        # gatekeeper, and let Kiro itself arbitrate the value.
+        return effort
+
+    if effort == "none":
+        # "none" means "no reasoning at all"; never substitute a positive level.
+        return effort
+
+    if client_vocabulary:
+        mapped = map_client_effort_to_official(effort, _positive_official_values(spec))
+        if mapped is not None:
+            if mapped != effort:
+                logger.debug(
+                    f"Paired client effort '{effort}' with official value "
+                    f"'{mapped}' for model '{model_id}': {list(spec.values)}"
+                )
+            return mapped
+
+    if effort in spec.value_set:
+        return effort
+
+    if effort not in EFFORT_RANK_ORDER:
+        raise ValueError(
+            f"Unsupported reasoning effort '{effort}'. Model '{model_id}' "
+            f"accepts: {', '.join(spec.values)}"
         )
-    return normalized
+
+    # Clamp to the nearest official rank, preferring the stronger value so an
+    # explicit request is never silently weakened by more than one step.
+    requested_rank = EFFORT_RANK_ORDER.index(effort)
+    candidates = [
+        value for value in spec.values if value in EFFORT_RANK_ORDER and value != "none"
+    ]
+    if not candidates:
+        raise ValueError(
+            f"Model '{model_id}' publishes no usable reasoning effort values: "
+            f"{', '.join(spec.values)}"
+        )
+    nearest = min(
+        candidates,
+        key=lambda value: (
+            abs(EFFORT_RANK_ORDER.index(value) - requested_rank),
+            -EFFORT_RANK_ORDER.index(value),
+        ),
+    )
+    logger.debug(
+        f"Clamped reasoning effort '{effort}' to '{nearest}' using the official "
+        f"enum for model '{model_id}': {list(spec.values)}"
+    )
+    return nearest
 
 
 # ==================================================================================================

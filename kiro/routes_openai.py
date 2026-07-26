@@ -28,6 +28,7 @@ Contains all API endpoints:
 
 import json
 from datetime import datetime, timezone
+from typing import Dict, List, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -47,8 +48,9 @@ from kiro.models_openai import (
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
+from kiro.model_capabilities import get_native_effort_spec
 from kiro.model_resolver import ModelResolver
-from kiro.converters_core import get_native_reasoning_format
+from kiro.converters_core import EFFORT_RANK_ORDER, get_native_reasoning_format
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_core import prefetch_stream
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
@@ -67,51 +69,51 @@ from kiro.grok_web_search import (
 )
 
 
-# Grok displays Kiro labels/ids, while each value uses Grok's canonical
-# six-level enum. Conversion preserves rank across the two vocabularies.
-#
-# Order is strongest-first (Max -> None) because that is the order the client
-# renders the picker in. The literal order below IS the advertised order: it is
-# never sorted at runtime, so each entry's id/value rank pairing stays fixed and
-# a reordering is a visible, reviewable diff.
-KIRO_REASONING_EFFORT_OPTIONS = [
-    ReasoningEffortOption(
-        id="max",
-        value="xhigh",
-        label="Max",
-        description="Maximum Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="xhigh",
-        value="high",
-        label="xHigh",
-        description="Extra-high Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="high",
-        value="medium",
-        label="High",
-        description="High Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="medium",
-        value="low",
-        label="Medium",
-        description="Medium Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="low",
-        value="minimal",
-        label="Low",
-        description="Low Kiro reasoning",
-    ),
-    ReasoningEffortOption(
-        id="none",
-        value="none",
-        label="None",
-        description="Disable Kiro reasoning",
-    ),
-]
+# Display labels for the effort ids Kiro can advertise. The set of options a
+# model actually exposes always comes from that model's official
+# ListAvailableModels schema, never from this table.
+KIRO_EFFORT_LABELS: Dict[str, str] = {
+    "none": "None",
+    "minimal": "Minimal",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "xHigh",
+    "max": "Max",
+}
+
+
+def build_reasoning_effort_options(
+    effort_values: Sequence[str],
+) -> List[ReasoningEffortOption]:
+    """
+    Build the client effort picker straight from a model's official enum.
+
+    Kiro advertises a different number of effort levels per model, so the
+    options are derived from the schema instead of a fixed list. Values are
+    presented strongest-first because the client renders them in list order,
+    and each option's ``value`` is the Kiro value the gateway will send back.
+
+    Args:
+        effort_values: Effort values exactly as advertised by Kiro.
+
+    Returns:
+        Effort options ordered strongest to weakest.
+    """
+    # EFFORT_RANK_ORDER runs weakest to strongest, so reverse it for display.
+    advertised = set(effort_values)
+    ordered = [value for value in reversed(EFFORT_RANK_ORDER) if value in advertised]
+    # Preserve any unknown value AWS may add later, appended in schema order.
+    ordered += [value for value in effort_values if value not in EFFORT_RANK_ORDER]
+    return [
+        ReasoningEffortOption(
+            id=value,
+            value=value,
+            label=KIRO_EFFORT_LABELS.get(value, value),
+            description=f"Kiro reasoning effort '{value}'",
+        )
+        for value in ordered
+    ]
 
 # Import debug_logger
 try:
@@ -220,6 +222,12 @@ async def get_models(request: Request):
             get_native_reasoning_format(model_id, model_info) is not None
         )
         context_window = get_context(model_id) if get_context else None
+        effort_spec = get_native_effort_spec(model_id, model_info)
+        reasoning_efforts = (
+            build_reasoning_effort_options(effort_spec.values)
+            if supports_native_reasoning and effort_spec
+            else []
+        )
         openai_models.append(
             OpenAIModel(
                 id=model_id,
@@ -227,11 +235,7 @@ async def get_models(request: Request):
                 description="Model via Kiro API",
                 context_window=context_window,
                 supports_reasoning_effort=supports_native_reasoning,
-                reasoning_efforts=(
-                    KIRO_REASONING_EFFORT_OPTIONS
-                    if supports_native_reasoning
-                    else []
-                ),
+                reasoning_efforts=reasoning_efforts,
             )
         )
     

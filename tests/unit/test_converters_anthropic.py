@@ -1867,17 +1867,33 @@ class TestAnthropicToKiroIntegration:
         """
         print("Creating request with thinking budget...")
         request = AnthropicMessagesRequest(
-            model="claude-sonnet-4.5",
+            model="claude-opus-4.8",
             messages=[AnthropicMessage(role="user", content="Test message")],
             max_tokens=1024,
             thinking={"type": "enabled", "budget_tokens": 6000}
         )
+        model_info = {
+            "modelId": "claude-opus-4.8",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {
+                                "enum": ["low", "medium", "high", "xhigh", "max"]
+                            }
+                        }
+                    }
+                }
+            },
+        }
 
         print("Calling anthropic_to_kiro...")
-        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-opus-4.8"):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000):
-                    payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+                    payload = anthropic_to_kiro(
+                        request, "test-conv-123", "arn:aws:test", model_info
+                    )
 
         print("Extracting userInputMessage content...")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
@@ -2122,6 +2138,38 @@ class TestAnthropicNativeReasoningPayloads:
         }
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
+
+    def test_maps_xhigh_to_max_when_model_enum_omits_xhigh(self):
+        """
+        What it does: Sends native xhigh to Claude 4.6's four-value schema.
+        Purpose: Prevent the intermittent REQUEST_BODY_INVALID seen in subagents.
+        """
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4.6",
+            messages=[AnthropicMessage(role="user", content="Solve this")],
+            max_tokens=4096,
+            output_config={"effort": "xhigh"},
+        )
+        model_info = {
+            "modelId": "claude-opus-4.6",
+            "additionalModelRequestFieldsSchema": {
+                "properties": {
+                    "output_config": {
+                        "properties": {
+                            "effort": {
+                                "enum": ["low", "medium", "high", "max"]
+                            }
+                        }
+                    }
+                }
+            },
+        }
+
+        payload = anthropic_to_kiro(request, "conv-46", "", model_info)
+
+        assert payload["additionalModelRequestFields"]["output_config"] == {
+            "effort": "max"
+        }
 
     def test_preserves_native_xhigh_output_config(self):
         request = AnthropicMessagesRequest(
