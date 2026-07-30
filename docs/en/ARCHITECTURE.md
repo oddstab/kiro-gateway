@@ -75,6 +75,7 @@ kiro-gateway/
 │   ├── utils.py               # Helper utilities
 │   ├── tokenizer.py           # Token counting (tiktoken)
 │   ├── debug_logger.py        # Debug request logging
+│   ├── usage_db.py            # SQLite usage tracking (opt-in)
 │   ├── exceptions.py          # Exception handlers
 │   ├── thinking_parser.py     # Thinking blocks parser
 │   │
@@ -452,7 +453,38 @@ prompt_tokens = total_tokens - completion_tokens             (subtraction)
 
 **Accuracy:** ~97-99.7% compared to API data.
 
-### 3.14. Kiro API Endpoints
+### 3.14. Usage Tracking (`kiro/usage_db.py`)
+
+**Problem:** Token counts are computed inside the streaming generators to build the response, then discarded. Nothing persists, so there is no way to see usage trends, per-account error rates, or how close requests run to the context limit.
+
+**Solution:** An opt-in SQLite table (`usage_log`) written once per request, queried directly by Grafana. Disabled by default via `USAGE_DB_ENABLED=false`.
+
+**Design constraints:**
+
+1. *Recording never affects the request.* All failures are caught (`sqlite3.Error`, `OSError`) and logged. A broken monitoring DB cannot take down the proxy.
+2. *All writes live in the route handlers.* Streaming generators never touch the DB.
+3. *The event loop is never blocked.* A single module-level connection guarded by a `threading.Lock`, with writes offloaded through `asyncio.to_thread`.
+
+**The `usage_sink` mechanism:**
+
+Route handlers know the account id and elapsed time; generators know the token counts. Rather than threading `account_id` and a timer down three call layers, the route passes a mutable dict:
+
+```python
+usage_sink: Dict[str, Any] = {}
+async for chunk in stream_with_first_token_retry(..., usage_sink=usage_sink):
+    yield chunk
+# finally: usage_sink now holds the final counts
+```
+
+Generators call `clear()` before `update()` because the retry wrapper can re-run the entire generator after a first-token timeout; without it, a retried request would blend both attempts' counts. An empty sink signals a mid-stream error or client disconnect, which the route records as an error row.
+
+**Coverage:** all four paths (OpenAI/Anthropic × streaming/non-streaming) plus upstream errors, network errors and client disconnects (`499`). Under the account system each failover attempt records its own row.
+
+**Data quality:** the `token_source` column distinguishes `context_usage` (derived from Kiro's reported usage, near-exact) from `tiktoken` (local estimate with the 1.15 correction factor). `normalize_token_source()` in `streaming_core.py` maps the internal labels (`"API Kiro"`, `"subtraction"`) onto this stable vocabulary.
+
+**Grafana access:** the live DB uses WAL, but Grafana reads a periodically refreshed DELETE-mode copy (`usage-readonly.db`). Where Grafana runs in a container over a v9fs bind mount (WSL reading a Windows drive), opening a WAL database fails with `disk I/O error`, because WAL coordinates through an mmap'd `-shm` file that v9fs does not support through a bind mount. DELETE mode needs no `-shm`.
+
+### 3.15. Kiro API Endpoints
 
 All URLs are dynamically formed based on the region:
 
@@ -803,6 +835,7 @@ When adding a new format, the following components work out of the box:
 | `cache.py` | Model cache |
 | `parsers.py` | AWS SSE parsing |
 | `tokenizer.py` | Token counting |
+| `usage_db.py` | Usage recording (opt-in) |
 | `converters_core.py` | Kiro payload building |
 | `streaming_core.py` | Kiro stream parsing |
 

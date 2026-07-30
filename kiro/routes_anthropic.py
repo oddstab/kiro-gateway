@@ -26,7 +26,8 @@ Reference: https://docs.anthropic.com/en/api/messages
 """
 
 import json
-from typing import Optional
+import time
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, Header
@@ -52,6 +53,7 @@ from kiro.streaming_anthropic import (
     stream_with_first_token_retry_anthropic,
 )
 from kiro.http_client import KiroHttpClient
+from kiro.usage_db import record_request_usage
 from kiro.utils import generate_conversation_id
 from kiro.tokenizer import estimate_request_tokens
 from kiro.config import WEB_SEARCH_ENABLED
@@ -446,6 +448,10 @@ async def messages(
             else:
                 system_for_tokenizer = request_data.system
             
+            # Timer is reset per attempt so each recorded row reflects the real
+            # duration of that account's attempt, not the whole failover loop.
+            attempt_started_at = time.perf_counter()
+
             try:
                 # Make request to Kiro API
                 response = await http_client.request_with_retry(
@@ -458,6 +464,10 @@ async def messages(
                 if response.status_code == 200:
                     if request_data.stream:
                         # Streaming mode
+                        # Collects final token counts from the streaming generator so
+                        # usage can be recorded once the stream completes.
+                        usage_sink: Dict[str, Any] = {}
+
                         async def stream_wrapper():
                             streaming_error = None
                             client_disconnected = False
@@ -476,6 +486,7 @@ async def messages(
                                     request_messages=messages_for_tokenizer,
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
+                                    usage_sink=usage_sink,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -499,6 +510,31 @@ async def messages(
                                 else:
                                     logger.info(f"HTTP 200 - POST /v1/messages (streaming) - completed")
                                 
+                                # 499 mirrors the nginx convention for a client-closed request.
+                                # An empty sink means the stream produced no usage data, which
+                                # record_request_usage records as zeros.
+                                if streaming_error:
+                                    recorded_status = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                                    recorded_error = str(streaming_error) or type(streaming_error).__name__
+                                elif client_disconnected:
+                                    recorded_status = 499
+                                    recorded_error = "Client disconnected during streaming"
+                                else:
+                                    recorded_status = 200
+                                    recorded_error = None
+                                await record_request_usage(
+                                    api_format="anthropic",
+                                    endpoint="/v1/messages",
+                                    is_stream=True,
+                                    model=request_data.model,
+                                    status_code=recorded_status,
+                                    duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                                    resolved_model=model_resolution.normalized,
+                                    account_id=account.id,
+                                    usage=usage_sink,
+                                    error_message=recorded_error,
+                                )
+
                                 if debug_logger:
                                     if streaming_error:
                                         debug_logger.flush_on_error(500, str(streaming_error))
@@ -529,6 +565,19 @@ async def messages(
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
                         
+                        await record_request_usage(
+                            api_format="anthropic",
+                            endpoint="/v1/messages",
+                            is_stream=False,
+                            model=request_data.model,
+                            status_code=200,
+                            duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                            resolved_model=model_resolution.normalized,
+                            account_id=account.id,
+                            usage=anthropic_response.get("usage"),
+                            finish_reason_fallback=anthropic_response.get("stop_reason"),
+                        )
+
                         if debug_logger:
                             debug_logger.discard_buffers()
                         
@@ -558,6 +607,20 @@ async def messages(
                         last_error_message = error_text
                         last_error_status = response.status_code
                     
+                    # Record the failed attempt before deciding whether to fail over,
+                    # so each account's error rate is visible per attempt.
+                    await record_request_usage(
+                        api_format="anthropic",
+                        endpoint="/v1/messages",
+                        is_stream=bool(request_data.stream),
+                        model=request_data.model,
+                        status_code=response.status_code,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        error_message=last_error_message,
+                    )
+
                     # Classify error
                     error_type = classify_error(response.status_code, error_reason)
                     
@@ -613,6 +676,18 @@ async def messages(
                     last_error_message = str(e.detail)
                     last_error_status = e.status_code
                     
+                    await record_request_usage(
+                        api_format="anthropic",
+                        endpoint="/v1/messages",
+                        is_stream=bool(request_data.stream),
+                        model=request_data.model,
+                        status_code=e.status_code,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        error_message=last_error_message,
+                    )
+
                     # Single account - no point in failover, break immediately
                     if len(all_accounts) == 1:
                         break
@@ -764,6 +839,8 @@ async def messages(
     else:
         system_for_tokenizer = request_data.system
     
+    attempt_started_at = time.perf_counter()
+
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)
         # Important: we wait for Kiro response BEFORE returning StreamingResponse,
@@ -806,6 +883,18 @@ async def messages(
             if debug_logger:
                 debug_logger.flush_on_error(response.status_code, error_message)
             
+            await record_request_usage(
+                api_format="anthropic",
+                endpoint="/v1/messages",
+                is_stream=bool(request_data.stream),
+                model=request_data.model,
+                status_code=response.status_code,
+                duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                resolved_model=model_resolution.normalized,
+                account_id=account.id,
+                error_message=error_message,
+            )
+
             # Return error in Anthropic format
             return JSONResponse(
                 status_code=response.status_code,
@@ -820,6 +909,10 @@ async def messages(
         
         if request_data.stream:
             # Streaming mode with first token retry
+            # Collects final token counts from the streaming generator so usage
+            # can be recorded once the stream completes.
+            usage_sink: Dict[str, Any] = {}
+
             async def stream_wrapper():
                 streaming_error = None
                 client_disconnected = False
@@ -840,6 +933,7 @@ async def messages(
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer,
                         request_system=system_for_tokenizer,
+                        usage_sink=usage_sink,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -864,6 +958,29 @@ async def messages(
                     else:
                         logger.info(f"HTTP 200 - POST /v1/messages (streaming) - completed")
                     
+                    # 499 mirrors the nginx convention for a client-closed request.
+                    if streaming_error:
+                        recorded_status = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                        recorded_error = str(streaming_error) or type(streaming_error).__name__
+                    elif client_disconnected:
+                        recorded_status = 499
+                        recorded_error = "Client disconnected during streaming"
+                    else:
+                        recorded_status = 200
+                        recorded_error = None
+                    await record_request_usage(
+                        api_format="anthropic",
+                        endpoint="/v1/messages",
+                        is_stream=True,
+                        model=request_data.model,
+                        status_code=recorded_status,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        usage=usage_sink,
+                        error_message=recorded_error,
+                    )
+
                     if debug_logger:
                         if streaming_error:
                             debug_logger.flush_on_error(500, str(streaming_error))
@@ -895,6 +1012,19 @@ async def messages(
             
             logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
             
+            await record_request_usage(
+                api_format="anthropic",
+                endpoint="/v1/messages",
+                is_stream=False,
+                model=request_data.model,
+                status_code=200,
+                duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                resolved_model=model_resolution.normalized,
+                account_id=account.id,
+                usage=anthropic_response.get("usage"),
+                finish_reason_fallback=anthropic_response.get("stop_reason"),
+            )
+
             if debug_logger:
                 debug_logger.discard_buffers()
             
@@ -909,6 +1039,19 @@ async def messages(
             logger.warning(f"Network error (legacy mode, no failover available)")
         
         logger.error(f"HTTP {e.status_code} - POST /v1/messages - {e.detail}")
+
+        await record_request_usage(
+            api_format="anthropic",
+            endpoint="/v1/messages",
+            is_stream=bool(request_data.stream),
+            model=request_data.model,
+            status_code=e.status_code,
+            duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+            resolved_model=model_resolution.normalized,
+            account_id=account.id,
+            error_message=str(e.detail),
+        )
+
         if debug_logger:
             debug_logger.flush_on_error(e.status_code, str(e.detail))
         raise

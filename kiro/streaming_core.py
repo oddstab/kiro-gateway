@@ -445,6 +445,43 @@ def calculate_tokens_from_context_usage(
     return 0, completion_tokens, "unknown", "tiktoken"
 
 
+# Maps the internal token-source labels onto a stable vocabulary for storage and
+# dashboards. The internal labels describe *how* a number was derived
+# ("subtraction", "API Kiro"); consumers only care *how trustworthy* it is.
+_TOKEN_SOURCE_ALIASES = {
+    "API Kiro": "context_usage",
+    "subtraction": "context_usage",
+    "tiktoken": "tiktoken",
+    "unknown": "unknown",
+}
+
+
+def normalize_token_source(source: Optional[str]) -> str:
+    """
+    Normalize an internal token-source label to the canonical vocabulary.
+
+    Canonical values are "context_usage" (derived from Kiro's reported context
+    usage, close to exact), "tiktoken" (local estimate carrying the Claude
+    correction factor) and "unknown".
+
+    Args:
+        source: Internal source label from calculate_tokens_from_context_usage,
+                or None.
+
+    Returns:
+        One of "context_usage", "tiktoken", "unknown".
+
+    Examples:
+        >>> normalize_token_source("API Kiro")
+        'context_usage'
+        >>> normalize_token_source(None)
+        'unknown'
+    """
+    if not source:
+        return "unknown"
+    return _TOKEN_SOURCE_ALIASES.get(source, "unknown")
+
+
 # ==================================================================================================
 # First Token Retry Logic
 # ==================================================================================================

@@ -290,6 +290,7 @@ kiro-gateway/
 │   ├── debug_logger.py              # Debug logging system
 │   ├── debug_middleware.py          # Debug middleware
 │   ├── tokenizer.py                 # Token counting (tiktoken)
+│   ├── usage_db.py                  # SQLite usage tracking (opt-in, for Grafana)
 │   └── utils.py                     # Helper utilities
 ├── tests/                           # Test suite
 │   ├── conftest.py                  # Shared fixtures
@@ -545,6 +546,11 @@ VPN_PROXY_URL="http://127.0.0.1:7890"  # For restricted networks
 
 # Debug logging (off by default)
 DEBUG_MODE="off"  # or "errors" or "all"
+
+# Usage tracking for Grafana (off by default)
+USAGE_DB_ENABLED="false"
+USAGE_DB_PATH="data/usage.db"
+USAGE_DB_SYNC_INTERVAL="30"
 ```
 
 ### Configuration Priority
@@ -627,7 +633,47 @@ Debug logging has three modes:
 
 Logs are saved to `debug_logs/` directory.
 
-### 8. VPN/Proxy Support
+### 8. Usage Tracking (`usage_db.py`)
+
+Opt-in SQLite recording of every request, intended for Grafana dashboards. Disabled by default (`USAGE_DB_ENABLED=false`) so the gateway writes nothing unless asked.
+
+Two rules govern this module:
+
+1. **Recording must never affect the request.** Every failure is caught (`sqlite3.Error`, `OSError`) and logged. A broken monitoring DB cannot take down the proxy.
+2. **All DB writes live in the route handlers.** The streaming generators never touch the DB; they only fill a caller-supplied dict.
+
+Token counts are computed deep inside the streaming generators and previously discarded. To surface them, both generators accept an optional `usage_sink` dict:
+
+```python
+# In the route handler
+usage_sink: Dict[str, Any] = {}
+async for chunk in stream_with_first_token_retry(..., usage_sink=usage_sink):
+    yield chunk
+# In the finally block, usage_sink now holds the final token counts
+```
+
+The generators call `usage_sink.clear()` before `update()`. This is required, not stylistic: `stream_with_first_token_retry` can re-run the whole generator after a first-token timeout, and the sink must hold only the final attempt's values rather than a blend of both.
+
+An **empty sink means no usable usage data** (mid-stream error or client disconnect), which the route records as an error row rather than a success.
+
+Recording happens on all four paths plus error branches, per the feature-consistency rule:
+
+| API | Mode | Where usage comes from |
+|-----|------|------------------------|
+| OpenAI | non-streaming | `openai_response["usage"]` |
+| OpenAI | streaming | `usage_sink` filled before the final chunk |
+| Anthropic | non-streaming | `anthropic_response["usage"]` + top-level `stop_reason` |
+| Anthropic | streaming | `usage_sink` filled after `message_stop` |
+
+Anthropic streaming has a subtlety: the wire format requires `input_tokens` in `message_start` up front, so an estimate is emitted there and corrected only at the end once Kiro's `context_usage` arrives. The sink is therefore filled **after** that correction, otherwise the recorded value would be the estimate.
+
+Status codes recorded: `200` success, `499` client disconnect (nginx convention), upstream status for API errors, `500` for internal errors. Under the account system each failover attempt records its own row, so per-account error rates are measurable.
+
+`token_source` is a data-quality flag with three values, normalized by `normalize_token_source()` in `streaming_core.py`: `context_usage` (derived from Kiro's own reported usage, close to exact), `tiktoken` (local estimate carrying `CLAUDE_CORRECTION_FACTOR = 1.15`), and `unknown`. Dashboards surface the ratio so estimates are not mistaken for exact figures.
+
+Grafana reads a DELETE-mode copy (`usage-readonly.db`), refreshed by a background task in the lifespan. This is not optional where Grafana runs in a container over a v9fs bind mount (WSL reading a Windows drive): a container opening a WAL database on such a mount fails with `disk I/O error`, because WAL needs mmap'd shared memory via the `-shm` file, which v9fs does not support through a bind mount. DELETE mode uses no `-shm`.
+
+### 9. VPN/Proxy Support
 
 For users in restricted networks (China, corporate):
 
