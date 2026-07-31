@@ -78,6 +78,8 @@ from kiro.config import (
     ACCOUNT_SYSTEM,
     ACCOUNTS_CONFIG_FILE,
     ACCOUNTS_STATE_FILE,
+    USAGE_DB_ENABLED,
+    USAGE_DB_SYNC_INTERVAL,
     _warn_timeout_configuration,
 )
 from kiro.auth import KiroAuthManager
@@ -88,6 +90,7 @@ from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro import usage_db
 
 
 # --- Loguru Configuration ---
@@ -509,6 +512,25 @@ async def lifespan(app: FastAPI):
     
     logger.info("Account system initialized successfully")
     
+    # ==============================================================================
+    # Usage Tracking: periodic readonly snapshot for Grafana
+    # ==============================================================================
+    # Grafana reads a DELETE-mode copy rather than the live WAL database, because
+    # a container reading WAL over a v9fs bind mount fails with "disk I/O error"
+    # (WAL needs mmap'd shared memory via the -shm file, which v9fs does not
+    # support through a bind mount). See kiro.usage_db.sync_readonly_copy.
+    usage_sync_task = None
+    if USAGE_DB_ENABLED:
+        async def _usage_sync_loop() -> None:
+            """Refresh the Grafana-readable DB snapshot on a fixed interval."""
+            while True:
+                await asyncio.sleep(USAGE_DB_SYNC_INTERVAL)
+                await usage_db.sync_readonly_copy()
+
+        await usage_db.sync_readonly_copy()  # initial snapshot on startup
+        usage_sync_task = asyncio.create_task(_usage_sync_loop())
+        logger.info(f"Usage tracking enabled (sync interval: {USAGE_DB_SYNC_INTERVAL}s)")
+
     yield
     
     # Graceful shutdown
@@ -521,6 +543,17 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     
+    # Stop usage sync and take a final snapshot so no data is lost on shutdown
+    if usage_sync_task is not None:
+        usage_sync_task.cancel()
+        try:
+            await usage_sync_task
+        except asyncio.CancelledError:
+            pass
+        await usage_db.sync_readonly_copy()
+        usage_db.close()
+        logger.info("Usage tracking DB closed")
+
     # Final state save
     await app.state.account_manager._save_state()
     logger.info("Final state saved")

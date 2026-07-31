@@ -27,6 +27,9 @@ debug*.json
 _notes/
 requests/
 
+# Generated usage tracking database (SQLite files created by usage_db.py)
+data/
+
 # Testing
 .pytest_cache/
 .coverage

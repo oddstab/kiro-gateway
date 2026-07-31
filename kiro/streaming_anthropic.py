@@ -46,6 +46,7 @@ from kiro.streaming_core import (
     FirstTokenTimeoutError,
     KiroEvent,
     calculate_tokens_from_context_usage,
+    normalize_token_source,
     stream_with_first_token_retry,
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
@@ -137,7 +138,8 @@ async def stream_kiro_to_anthropic(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    usage_sink: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to Anthropic SSE format.
@@ -155,6 +157,11 @@ async def stream_kiro_to_anthropic(
         request_tools: Original request tools (for token counting)
         request_system: Original system prompt (for token counting)
         conversation_id: Stable conversation ID for truncation recovery (optional)
+        usage_sink: Optional mutable dict filled with final token counts so the
+            caller (route handler) can record usage after the stream completes.
+            Uses the same key names as the OpenAI streaming path so callers have
+            a single shape to consume. Left untouched on error paths and client
+            disconnects, so an empty sink signals no usable usage data.
     
     Yields:
         Strings in Anthropic SSE format
@@ -167,6 +174,9 @@ async def stream_kiro_to_anthropic(
     output_tokens = 0
     full_content = ""
     full_thinking_content = ""
+    # Origin of the final input_tokens value, mirroring the OpenAI path's semantics:
+    # "context_usage" (accurate, from Kiro) > "tiktoken" (local estimate) > "unknown".
+    token_source = "unknown"
     
     # NOTE: Anthropic streaming spec requires input_tokens in message_start (beginning),
     # but Kiro API provides accurate context_usage at the end of stream.
@@ -183,6 +193,7 @@ async def stream_kiro_to_anthropic(
             apply_claude_correction=False
         )
         input_tokens = request_token_stats["total_tokens"]
+        token_source = "tiktoken"
     
     # Track content blocks - thinking block is index 0, text block is index 1 (when thinking enabled)
     current_block_index = 0
@@ -734,6 +745,7 @@ async def stream_kiro_to_anthropic(
             # Only override local estimate when upstream context usage is available
             if prompt_source != "unknown":
                 input_tokens = prompt_tokens
+                token_source = prompt_source
         
         # Determine stop reason (truncation has highest priority)
         if content_was_truncated:
@@ -787,6 +799,27 @@ async def stream_kiro_to_anthropic(
                     f"content={content_was_truncated}. Will be handled when client sends next request."
                 )
         
+        # Expose final token counts to the caller for usage recording.
+        # Placed here deliberately: Anthropic's wire format requires input_tokens in
+        # message_start at the very beginning, so an estimate is emitted there and only
+        # corrected above once Kiro's context_usage arrives. Filling the sink any earlier
+        # would record the estimate instead of the corrected value.
+        # clear() before update() is required, not stylistic: the retry wrapper may re-run
+        # this generator after a first token timeout, and the sink must end up holding only
+        # the final attempt's values instead of a blend of both attempts.
+        if usage_sink is not None:
+            usage_sink.clear()
+            usage_sink.update({
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cache_read_input_tokens": upstream_cache_usage.get("cache_read_input_tokens", 0),
+                "cache_creation_input_tokens": upstream_cache_usage.get("cache_creation_input_tokens", 0),
+                "context_usage_percentage": context_usage_percentage,
+                "token_source": normalize_token_source(token_source),
+                "finish_reason": stop_reason,
+            })
+
         logger.debug(
             f"[Anthropic Streaming] Completed: "
             f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
@@ -994,7 +1027,8 @@ async def stream_with_first_token_retry_anthropic(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    usage_sink: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout for Anthropic API.
@@ -1017,6 +1051,9 @@ async def stream_with_first_token_retry_anthropic(
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
         request_system: Original system prompt (for fallback token counting)
+        usage_sink: Optional mutable dict filled with final token counts.
+            On retry the sink is fully overwritten, so it reflects only the
+            attempt that actually produced a response.
     
     Yields:
         Strings in Anthropic SSE format
@@ -1049,6 +1086,7 @@ async def stream_with_first_token_retry_anthropic(
             request_messages=request_messages,
             request_tools=request_tools,
             request_system=request_system,
+            usage_sink=usage_sink,
         ):
             yield chunk
     

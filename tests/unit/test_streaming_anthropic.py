@@ -1729,3 +1729,505 @@ class TestNativeReasoningSignature:
             "thinking": "Native thought",
             "signature": "sig-native",
         }
+
+
+# ==================================================================================================
+# Tests for usage_sink (usage tracking)
+# ==================================================================================================
+
+def _usage_from_message_delta(chunks: list) -> dict:
+    """Extract the usage block from the message_delta event.
+
+    Args:
+        chunks: SSE strings yielded by the Anthropic streaming generator.
+
+    Returns:
+        The usage dict reported to the client, or an empty dict.
+    """
+    for chunk in chunks:
+        if "message_delta" not in chunk:
+            continue
+        for line in chunk.splitlines():
+            if line.startswith("data:"):
+                parsed = json.loads(line[len("data:"):].strip())
+                if parsed.get("type") == "message_delta":
+                    return parsed.get("usage", {})
+    return {}
+
+
+def _input_tokens_from_message_start(chunks: list) -> int:
+    """Extract the up-front input_tokens estimate from message_start.
+
+    Args:
+        chunks: SSE strings yielded by the Anthropic streaming generator.
+
+    Returns:
+        The estimated input_tokens sent in message_start, or 0.
+    """
+    for chunk in chunks:
+        if "message_start" not in chunk:
+            continue
+        for line in chunk.splitlines():
+            if line.startswith("data:"):
+                parsed = json.loads(line[len("data:"):].strip())
+                if parsed.get("type") == "message_start":
+                    return parsed["message"]["usage"]["input_tokens"]
+    return 0
+
+
+class TestAnthropicUsageSinkSuccess:
+    """Tests for usage_sink population on successful Anthropic streams."""
+
+    @pytest.mark.asyncio
+    async def test_sink_none_does_not_change_output(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Streaming with usage_sink=None yields unchanged events.
+        Goal: Guarantee the new parameter is a no-op when unused (regression guard).
+        """
+        print("Setup: Two identical streams, one with an explicit None sink...")
+
+        def make_stream():
+            async def mock_parse_kiro_stream(*args, **kwargs):
+                yield KiroEvent(type="content", content="Hello")
+                yield KiroEvent(type="context_usage", context_usage_percentage=10.0)
+            return mock_parse_kiro_stream
+
+        async def run(sink):
+            events = []
+            with patch('kiro.streaming_anthropic.parse_kiro_stream', make_stream()):
+                async for chunk in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4.5", mock_model_cache,
+                    mock_auth_manager, usage_sink=sink
+                ):
+                    events.append(chunk)
+            return events
+
+        print("Action: Comparing event types across both runs...")
+        a = await run(None)
+        b = await run(None)
+
+        def event_names(chunks):
+            return [c.split("\n")[0] for c in chunks]
+
+        assert event_names(a) == event_names(b)
+        print("✓ usage_sink=None does not change the event sequence")
+
+    @pytest.mark.asyncio
+    async def test_sink_matches_reported_output_tokens(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink completion_tokens equals the output_tokens sent to the client.
+        Goal: Prevent recording numbers that differ from the API response.
+        """
+        print("Setup: Stream with content and context_usage...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello world")
+            yield KiroEvent(type="context_usage", context_usage_percentage=20.0)
+
+        sink = {}
+        chunks = []
+
+        print("Action: Streaming with a usage_sink...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for chunk in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                chunks.append(chunk)
+
+        reported = _usage_from_message_delta(chunks)
+        print(f"Sink: {sink}")
+        print(f"Reported: {reported}")
+
+        assert sink["completion_tokens"] == reported["output_tokens"]
+        assert sink["total_tokens"] == sink["prompt_tokens"] + sink["completion_tokens"]
+        print("✓ Sink agrees with the usage reported to the client")
+
+    @pytest.mark.asyncio
+    async def test_sink_uses_corrected_input_tokens_not_estimate(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink prompt_tokens is the context_usage-corrected value, not the
+                      estimate that Anthropic's format forces into message_start.
+        Goal: This is the whole reason the sink is filled after message_stop. If it were
+              filled earlier we would record the rough up-front guess instead.
+        """
+        print("Setup: Small request (low estimate) with a high context_usage (44% of 200k)...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=44.0)
+
+        sink = {}
+        chunks = []
+
+        print("Action: Streaming with a tiny message so estimate << corrected value...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for chunk in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache, mock_auth_manager,
+                request_messages=[{"role": "user", "content": "Hi"}],
+                usage_sink=sink
+            ):
+                chunks.append(chunk)
+
+        estimate = _input_tokens_from_message_start(chunks)
+        corrected = sink["prompt_tokens"]
+        print(f"message_start estimate={estimate}, sink prompt_tokens={corrected}")
+
+        # 44% of the mocked 200k context is ~88000, far above the handful of tokens
+        # a two-character message estimates to, so the two provably differ.
+        assert estimate != corrected, (
+            "estimate and corrected value are identical, so this test cannot "
+            "distinguish them"
+        )
+        assert corrected > estimate
+        print("✓ Sink records the corrected input_tokens, not the estimate")
+
+    @pytest.mark.asyncio
+    async def test_token_source_context_usage(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: token_source is 'context_usage' when Kiro reports a percentage.
+        Goal: Verify the data-quality flag matches the OpenAI path's vocabulary.
+        """
+        print("Setup: Stream with context_usage=15%...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=15.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                pass
+
+        print(f"token_source={sink['token_source']}")
+        assert sink["token_source"] == "context_usage"
+        assert sink["context_usage_percentage"] == 15.0
+        print("✓ token_source marks the accurate path")
+
+    @pytest.mark.asyncio
+    async def test_token_source_tiktoken_without_context_usage(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: token_source is 'tiktoken' when Kiro sends no context_usage.
+        Goal: Verify estimated rows are flagged as estimates.
+        """
+        print("Setup: Stream with no context_usage event...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+
+        sink = {}
+
+        print("Action: Streaming with request messages so the estimate runs...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache, mock_auth_manager,
+                request_messages=[{"role": "user", "content": "Hello there"}],
+                usage_sink=sink
+            ):
+                pass
+
+        print(f"token_source={sink['token_source']}, prompt_tokens={sink['prompt_tokens']}")
+        assert sink["token_source"] == "tiktoken"
+        assert sink["prompt_tokens"] > 0
+        print("✓ token_source marks the fallback estimate")
+
+    @pytest.mark.asyncio
+    async def test_cache_tokens_forwarded(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Upstream cache token counts reach the sink.
+        Goal: Prompt-cache usage must be recorded, not dropped.
+        """
+        print("Setup: Stream including a usage event with cache token fields...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="usage", usage={
+                "cache_read_input_tokens": 128,
+                "cache_creation_input_tokens": 64,
+            })
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                pass
+
+        print(f"cache_read={sink['cache_read_input_tokens']}, "
+              f"cache_creation={sink['cache_creation_input_tokens']}")
+        assert sink["cache_read_input_tokens"] == 128
+        assert sink["cache_creation_input_tokens"] == 64
+        print("✓ Cache token fields forwarded")
+
+    @pytest.mark.asyncio
+    async def test_cache_tokens_default_to_zero(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Cache fields default to 0 when upstream reports none.
+        Goal: Avoid NULLs in columns the dashboard sums.
+        """
+        print("Setup: Stream with no usage event...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                pass
+
+        assert sink["cache_read_input_tokens"] == 0
+        assert sink["cache_creation_input_tokens"] == 0
+        print("✓ Cache fields default to zero")
+
+    @pytest.mark.asyncio
+    async def test_finish_reason_recorded(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: stop_reason is recorded as finish_reason.
+        Goal: Verify stop-reason reporting uses the shared key name.
+        """
+        print("Setup: Plain content stream with a completion signal...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="All done")
+            yield KiroEvent(type="context_usage", context_usage_percentage=6.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                pass
+
+        print(f"finish_reason={sink['finish_reason']}")
+        assert sink["finish_reason"] == "end_turn"
+        print("✓ finish_reason recorded from stop_reason")
+
+
+class TestAnthropicUsageSinkErrors:
+    """Tests for usage_sink behaviour on Anthropic failure paths."""
+
+    @pytest.mark.asyncio
+    async def test_sink_empty_on_midstream_error(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink is untouched when the stream raises partway through.
+        Goal: An empty sink tells the route to record an error row instead.
+        """
+        print("Setup: Stream that raises after one event...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Partial")
+            raise RuntimeError("Upstream died")
+
+        sink = {}
+
+        print("Action: Consuming the stream (it handles the error internally)...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            try:
+                async for _ in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4.5", mock_model_cache,
+                    mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+            except RuntimeError:
+                pass
+
+        print(f"Sink after error: {sink}")
+        assert sink == {}
+        print("✓ Sink left empty on mid-stream error")
+
+    @pytest.mark.asyncio
+    async def test_sink_empty_on_client_disconnect(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink is untouched when the consumer stops early.
+        Goal: Disconnects must not be recorded as completed usage.
+        """
+        print("Setup: Stream consumed only partially...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="First")
+            yield KiroEvent(type="content", content="Second")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {}
+
+        print("Action: Breaking out after the first event, then closing...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            gen = stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            )
+            async for _ in gen:
+                break
+            await gen.aclose()
+
+        print(f"Sink after disconnect: {sink}")
+        assert sink == {}
+        print("✓ Sink left empty on client disconnect")
+
+
+class TestAnthropicUsageSinkEdgeCases:
+    """Edge cases for Anthropic usage_sink handling."""
+
+    @pytest.mark.asyncio
+    async def test_stale_keys_cleared(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Pre-existing keys are removed before repopulation.
+        Goal: Verify clear() runs so a retried stream cannot blend two attempts.
+        """
+        print("Setup: Sink pre-populated with stale values...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Fresh")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {"stale_key": "gone", "completion_tokens": 424242}
+
+        print("Action: Streaming into the dirty sink...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_kiro_to_anthropic(
+                mock_response, "claude-sonnet-4.5", mock_model_cache,
+                mock_auth_manager, usage_sink=sink
+            ):
+                pass
+
+        print(f"Sink keys: {sorted(sink)}")
+        assert "stale_key" not in sink
+        assert sink["completion_tokens"] != 424242
+        print("✓ Stale keys cleared before repopulation")
+
+    @pytest.mark.asyncio
+    async def test_retry_wrapper_forwards_sink(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: stream_with_first_token_retry_anthropic forwards the sink.
+        Goal: Verify the pass-through layer is wired, not silently dropping the arg.
+        """
+        print("Setup: Successful stream through the retry wrapper...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        response = AsyncMock()
+        response.status_code = 200
+        response.aclose = AsyncMock()
+
+        async def make_request():
+            return response
+
+        sink = {}
+
+        print("Action: Streaming through the retry wrapper...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_with_first_token_retry_anthropic(
+                make_request=make_request,
+                model="claude-sonnet-4.5",
+                model_cache=mock_model_cache,
+                auth_manager=mock_auth_manager,
+                initial_response=response,
+                usage_sink=sink,
+            ):
+                pass
+
+        print(f"Sink populated: {bool(sink)}")
+        assert sink, "retry wrapper did not forward usage_sink"
+        assert "total_tokens" in sink
+        print("✓ Retry wrapper forwards the sink")
+
+    @pytest.mark.asyncio
+    async def test_sink_holds_only_final_attempt_after_retry(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: After a first-token timeout and retry, the sink holds only the
+                      successful attempt's values.
+        Goal: This is what clear() protects; a blended sink would double-count tokens
+              on every retried request.
+        """
+        print("Setup: First attempt emits long content then times out; second is short...")
+
+        from kiro.streaming_core import FirstTokenTimeoutError
+
+        attempt = {"n": 0}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                yield KiroEvent(type="content", content="B" * 400)
+                raise FirstTokenTimeoutError("No first token")
+            yield KiroEvent(type="content", content="ok")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        first = AsyncMock()
+        first.status_code = 200
+        first.aclose = AsyncMock()
+        second = AsyncMock()
+        second.status_code = 200
+        second.aclose = AsyncMock()
+
+        async def make_request():
+            return second
+
+        sink = {}
+
+        print("Action: Streaming through the retry wrapper...")
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            async for _ in stream_with_first_token_retry_anthropic(
+                make_request=make_request,
+                model="claude-sonnet-4.5",
+                model_cache=mock_model_cache,
+                auth_manager=mock_auth_manager,
+                initial_response=first,
+                max_retries=2,
+                usage_sink=sink,
+            ):
+                pass
+
+        print(f"Attempts run: {attempt['n']}, completion_tokens={sink['completion_tokens']}")
+        assert attempt["n"] == 2, "retry should have happened"
+        assert sink["completion_tokens"] < 20, (
+            f"completion_tokens={sink['completion_tokens']} looks like it includes "
+            f"the failed attempt's 400-char content"
+        )
+        print("✓ Sink holds only the final attempt")

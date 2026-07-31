@@ -901,6 +901,79 @@ DEBUG_MODE=errors
 
 ---
 
+## 📊 用量追蹤（Grafana）
+
+用量追蹤**預設為停用**。啟用後，每個請求的 token 數、模型、帳號、耗時與狀態碼都會寫入本機 SQLite，可用 Grafana 繪製儀表板。
+
+```env
+# 啟用用量追蹤（預設 false）
+USAGE_DB_ENABLED=true
+
+# 資料庫位置（預設 data/usage.db，相對於專案根目錄）
+USAGE_DB_PATH=data/usage.db
+
+# Grafana 可讀副本的同步間隔，單位秒（預設 30）
+USAGE_DB_SYNC_INTERVAL=30
+```
+
+### 記錄內容
+
+四條路徑（OpenAI／Anthropic × 串流／非串流）都會記錄，失敗請求也會記錄：
+
+| 狀態碼 | 情境 |
+|--------|------|
+| `200` | 成功完成 |
+| `499` | 用戶端提前中斷連線（沿用 nginx 慣例） |
+| `4xx` / `5xx` | 上游 Kiro API 錯誤，附 `error_message` |
+
+啟用帳號系統時，failover 的每次嘗試各記一列，因此可以算出各帳號的失敗率。
+
+### token 數的精確度
+
+`token_source` 欄位標示每一列的 token 數是怎麼來的：
+
+| 值 | 說明 |
+|----|------|
+| `context_usage` | 由 Kiro 回傳的 context 使用率換算，接近實際值 |
+| `tiktoken` | 本機估算，含 1.15 的經驗修正係數，僅供參考 |
+| `unknown` | 無可用資料（例如錯誤或中斷的請求） |
+
+儀表板有一個面板顯示兩者比例，避免把估算值當成精確值使用。
+
+### 兩個資料庫檔案
+
+| 檔案 | 用途 |
+|------|------|
+| `data/usage.db` | 主資料庫，WAL 模式，由 gateway 寫入 |
+| `data/usage-readonly.db` | DELETE 模式副本，供 Grafana 讀取，每 30 秒更新 |
+
+需要副本的原因：Grafana 若跑在容器中、透過 v9fs bind mount（WSL 掛載 Windows 磁碟）讀取，開啟 WAL 資料庫會直接失敗並回報 `disk I/O error`。WAL 需要透過 `-shm` 檔做 mmap 共享記憶體協調，而 v9fs 經過 bind mount 不支援；DELETE 模式不需要 `-shm`，因此可以正常讀取。
+
+### 搭配 Grafana
+
+Grafana 用 [frser-sqlite-datasource](https://github.com/fr-ser/grafana-sqlite-datasource) 直接查詢 `usage-readonly.db`。把該檔案所在資料夾掛進 Grafana 容器，datasource 指向副本即可：
+
+```yaml
+# Grafana 的 docker-compose.yml
+volumes:
+  - /path/to/kiro-gateway/data:/var/lib/grafana/data/kiro-usage
+```
+
+```yaml
+# provisioning/datasources/kiro-sqlite.yml
+datasources:
+  - name: Kiro Gateway Usage
+    type: frser-sqlite-datasource
+    uid: kiro-gateway-sqlite
+    jsonData:
+      path: /var/lib/grafana/data/kiro-usage/usage-readonly.db
+      pathOptions: "_pragma=busy_timeout(5000)&_journal_mode=DELETE"
+```
+
+> `data/` 已列入 `.gitignore`。資料庫中的 `account_id` 是憑證檔案的完整路徑，請勿提交。
+
+---
+
 ## 🔧 疑難排解
 
 ### 連線問題

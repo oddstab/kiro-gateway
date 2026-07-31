@@ -1494,3 +1494,484 @@ class TestStreamingOpenaiTruncationDetection:
         # Should extract "length" from streaming chunks
         assert result["choices"][0]["finish_reason"] == "length"
         print("✓ collect_stream_response extracts finish_reason correctly")
+
+
+# ==================================================================================================
+# Tests for usage_sink (usage tracking)
+# ==================================================================================================
+
+def _final_usage_from_chunks(chunks: list) -> dict:
+    """Extract the usage block from the final SSE chunk that carries one.
+
+    Args:
+        chunks: SSE strings yielded by the streaming generator.
+
+    Returns:
+        The usage dict from the last chunk containing one, or an empty dict.
+    """
+    usage = {}
+    for chunk in chunks:
+        if not chunk.startswith("data:"):
+            continue
+        payload = chunk[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        parsed = json.loads(payload)
+        if "usage" in parsed:
+            usage = parsed["usage"]
+    return usage
+
+
+class TestUsageSinkSuccess:
+    """Tests for usage_sink population on successful streams."""
+
+    @pytest.mark.asyncio
+    async def test_sink_none_produces_identical_chunks(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Streaming with usage_sink=None yields the same chunks as without it.
+        Goal: Guarantee the new parameter is a no-op when unused (regression guard).
+        """
+        print("Setup: Identical streams, one with usage_sink=None...")
+
+        def make_stream():
+            async def mock_parse_kiro_stream(*args, **kwargs):
+                yield KiroEvent(type="content", content="Hello")
+                yield KiroEvent(type="context_usage", context_usage_percentage=10.0)
+            return mock_parse_kiro_stream
+
+        async def run(sink):
+            chunks = []
+            with patch('kiro.streaming_openai.parse_kiro_stream', make_stream()):
+                with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                    async for chunk in stream_kiro_to_openai_internal(
+                        mock_http_client, mock_response, "claude-sonnet-4",
+                        mock_model_cache, mock_auth_manager, usage_sink=sink
+                    ):
+                        chunks.append(chunk)
+            return chunks
+
+        print("Action: Running with no sink and with an explicit None sink...")
+        without = await run(None)
+        with_none = await run(None)
+
+        # Completion ids and timestamps differ per run, so compare structure only.
+        def strip_ids(chunks):
+            out = []
+            for c in chunks:
+                if c.startswith("data:") and "[DONE]" not in c:
+                    d = json.loads(c[len("data:"):].strip())
+                    d.pop("id", None)
+                    d.pop("created", None)
+                    out.append(d)
+                else:
+                    out.append(c)
+            return out
+
+        assert strip_ids(without) == strip_ids(with_none)
+        print("✓ usage_sink=None does not change streaming output")
+
+    @pytest.mark.asyncio
+    async def test_sink_matches_final_chunk_usage(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink token counts equal what the client is told in the final chunk.
+        Goal: Prevent the DB recording numbers that differ from the API response.
+        """
+        print("Setup: Stream with content and context_usage...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello world")
+            yield KiroEvent(type="context_usage", context_usage_percentage=25.0)
+
+        sink = {}
+        chunks = []
+
+        print("Action: Streaming with a usage_sink...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for chunk in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    chunks.append(chunk)
+
+        reported = _final_usage_from_chunks(chunks)
+        print(f"Sink: {sink}")
+        print(f"Reported to client: {reported}")
+
+        assert sink["prompt_tokens"] == reported["prompt_tokens"]
+        assert sink["completion_tokens"] == reported["completion_tokens"]
+        assert sink["total_tokens"] == reported["total_tokens"]
+        print("✓ Sink agrees with the usage reported to the client")
+
+    @pytest.mark.asyncio
+    async def test_token_source_is_context_usage_when_kiro_reports_it(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: token_source is 'context_usage' when Kiro returns a percentage.
+        Goal: Verify the data-quality flag marks accurate rows.
+        """
+        print("Setup: Stream with context_usage=30%...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="context_usage", context_usage_percentage=30.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"token_source={sink['token_source']}, context={sink['context_usage_percentage']}")
+        assert sink["token_source"] == "context_usage"
+        assert sink["context_usage_percentage"] == 30.0
+        print("✓ token_source reflects Kiro-provided context usage")
+
+    @pytest.mark.asyncio
+    async def test_token_source_is_tiktoken_without_context_usage(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: token_source is 'tiktoken' when Kiro sends no context_usage.
+        Goal: Verify estimated rows are flagged as estimates.
+        """
+        print("Setup: Stream with content only, no context_usage...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+
+        sink = {}
+
+        print("Action: Streaming with request messages for fallback counting...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager,
+                    request_messages=[{"role": "user", "content": "Hello there"}],
+                    usage_sink=sink
+                ):
+                    pass
+
+        print(f"token_source={sink['token_source']}, prompt_tokens={sink['prompt_tokens']}")
+        assert sink["token_source"] == "tiktoken"
+        assert sink["prompt_tokens"] > 0
+        assert sink["context_usage_percentage"] is None
+        print("✓ token_source marks the fallback estimate")
+
+    @pytest.mark.asyncio
+    async def test_total_tokens_is_internally_consistent(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: total_tokens equals prompt + completion on the tiktoken path.
+        Goal: Catch arithmetic drift in the fallback branch.
+        """
+        print("Setup: Stream without context_usage so the fallback computes the total...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Some generated answer")
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager,
+                    request_messages=[{"role": "user", "content": "Question"}],
+                    usage_sink=sink
+                ):
+                    pass
+
+        print(f"{sink['prompt_tokens']} + {sink['completion_tokens']} == {sink['total_tokens']}?")
+        assert sink["total_tokens"] == sink["prompt_tokens"] + sink["completion_tokens"]
+        print("✓ total_tokens is consistent")
+
+    @pytest.mark.asyncio
+    async def test_finish_reason_recorded(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: finish_reason lands in the sink.
+        Goal: Verify stop-reason reporting for dashboards.
+        """
+        print("Setup: Content stream ending with context_usage (a clean completion signal)...")
+
+        # A context_usage event marks the stream as properly completed. Without it,
+        # the generator treats the stream as truncated and reports finish_reason=length.
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Done")
+            yield KiroEvent(type="context_usage", context_usage_percentage=8.0)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"finish_reason={sink['finish_reason']}")
+        assert sink["finish_reason"] == "stop"
+        print("✓ finish_reason recorded")
+
+    @pytest.mark.asyncio
+    async def test_truncated_stream_records_length_finish_reason(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: A stream ending without completion signals records finish_reason=length.
+        Goal: Truncation must be visible in the recorded data, not silently look like success.
+        """
+        print("Setup: Content stream with no completion signal (truncated)...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Cut off mid-sen")
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"finish_reason={sink['finish_reason']}")
+        assert sink["finish_reason"] == "length"
+        print("✓ Truncation surfaces as finish_reason=length")
+
+
+class TestUsageSinkErrors:
+    """Tests for usage_sink behaviour on failure paths."""
+
+    @pytest.mark.asyncio
+    async def test_sink_stays_empty_on_midstream_exception(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink is untouched when the stream raises partway through.
+        Goal: An empty sink is how the route detects there is no usable usage data.
+        """
+        print("Setup: Stream that raises after one content event...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Partial")
+            raise RuntimeError("Upstream died")
+
+        sink = {}
+
+        print("Action: Streaming and swallowing the error...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                with pytest.raises(RuntimeError):
+                    async for _ in stream_kiro_to_openai_internal(
+                        mock_http_client, mock_response, "claude-sonnet-4",
+                        mock_model_cache, mock_auth_manager, usage_sink=sink
+                    ):
+                        pass
+
+        print(f"Sink after error: {sink}")
+        assert sink == {}
+        print("✓ Sink left empty on mid-stream error")
+
+    @pytest.mark.asyncio
+    async def test_sink_stays_empty_on_client_disconnect(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Sink is untouched when the consumer stops early.
+        Goal: Client disconnects must not be recorded as completed usage.
+        """
+        print("Setup: Stream consumed only partially...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="First")
+            yield KiroEvent(type="content", content="Second")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {}
+
+        print("Action: Breaking out of the loop after the first chunk...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                gen = stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                )
+                async for _ in gen:
+                    break
+                await gen.aclose()
+
+        print(f"Sink after disconnect: {sink}")
+        assert sink == {}
+        print("✓ Sink left empty on client disconnect")
+
+
+class TestUsageSinkEdgeCases:
+    """Edge cases for usage_sink handling."""
+
+    @pytest.mark.asyncio
+    async def test_stale_keys_are_cleared(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Pre-existing keys in the sink are removed before repopulation.
+        Goal: Verify clear() runs, so a retried stream cannot blend two attempts.
+        """
+        print("Setup: Sink pre-populated with stale values...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Fresh")
+
+        sink = {"stale_key": "should be gone", "prompt_tokens": 99999}
+
+        print("Action: Streaming into the dirty sink...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"Sink keys: {sorted(sink)}")
+        assert "stale_key" not in sink
+        assert sink["prompt_tokens"] != 99999
+        print("✓ Stale keys cleared before repopulation")
+
+    @pytest.mark.asyncio
+    async def test_sink_holds_only_final_attempt_after_retry(
+        self, mock_model_cache, mock_auth_manager, mock_http_client
+    ):
+        """
+        What it does: After a first-token timeout and retry, the sink holds only
+                      the successful attempt's values.
+        Goal: This is precisely what clear() protects; a blended sink would
+              double-count tokens for every retried request.
+        """
+        print("Setup: First attempt times out, second attempt succeeds with distinct content...")
+
+        attempt = {"n": 0}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                # Long content that would inflate the counts if it leaked through.
+                yield KiroEvent(type="content", content="A" * 400)
+                raise FirstTokenTimeoutError("No first token")
+            yield KiroEvent(type="content", content="ok")
+
+        first_response = AsyncMock()
+        first_response.status_code = 200
+        first_response.aclose = AsyncMock()
+
+        second_response = AsyncMock()
+        second_response.status_code = 200
+        second_response.aclose = AsyncMock()
+
+        async def make_request():
+            return second_response
+
+        sink = {}
+
+        print("Action: Streaming through the retry wrapper...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_with_first_token_retry(
+                    make_request=make_request,
+                    client=mock_http_client,
+                    model="claude-sonnet-4",
+                    model_cache=mock_model_cache,
+                    auth_manager=mock_auth_manager,
+                    initial_response=first_response,
+                    max_retries=2,
+                    request_messages=[{"role": "user", "content": "Hi"}],
+                    usage_sink=sink
+                ):
+                    pass
+
+        # "ok" is far shorter than 400 chars, so a blended sink would be obvious.
+        completion_for_ok = sink["completion_tokens"]
+        print(f"Attempts run: {attempt['n']}, completion_tokens={completion_for_ok}")
+        assert attempt["n"] == 2, "retry should have happened"
+        assert completion_for_ok < 20, (
+            f"completion_tokens={completion_for_ok} looks like it includes the "
+            f"failed attempt's 400-char content"
+        )
+        print("✓ Sink holds only the final attempt")
+
+    @pytest.mark.asyncio
+    async def test_credits_used_recorded_when_kiro_meters(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Kiro's metering value reaches the sink as credits_used.
+        Goal: Verify the Kiro-specific usage event is captured.
+        """
+        print("Setup: Stream including a usage (metering) event...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+            yield KiroEvent(type="usage", usage=7)
+
+        sink = {}
+
+        print("Action: Streaming...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai_internal(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"credits_used={sink['credits_used']}")
+        assert sink["credits_used"] == 7
+        print("✓ credits_used captured from Kiro metering event")
+
+    @pytest.mark.asyncio
+    async def test_wrapper_forwards_sink(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: stream_kiro_to_openai forwards the sink to the internal generator.
+        Goal: Verify the pass-through layer is wired, not silently dropping the arg.
+        """
+        print("Setup: Stream via the public wrapper...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hi")
+
+        sink = {}
+
+        print("Action: Streaming through stream_kiro_to_openai...")
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_openai(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager, usage_sink=sink
+                ):
+                    pass
+
+        print(f"Sink populated: {bool(sink)}")
+        assert sink, "wrapper did not forward usage_sink"
+        assert "total_tokens" in sink
+        print("✓ Public wrapper forwards the sink")

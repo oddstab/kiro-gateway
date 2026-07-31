@@ -27,8 +27,9 @@ Contains all API endpoints:
 """
 
 import json
+import time
 from datetime import datetime, timezone
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,6 +56,7 @@ from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_core import prefetch_stream
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
+from kiro.usage_db import record_request_usage
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import (
@@ -564,6 +566,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
             
+            # Timer is reset per attempt so each recorded row reflects the real
+            # duration of that account's attempt, not the whole failover loop.
+            attempt_started_at = time.perf_counter()
+
             try:
                 # Make request to Kiro API
                 response = await http_client.request_with_retry(
@@ -580,6 +586,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     
                     if request_data.stream:
                         # Streaming mode
+                        # Collects final token counts from the streaming generator so
+                        # usage can be recorded once the stream completes.
+                        usage_sink: Dict[str, Any] = {}
+
                         async def stream_wrapper():
                             streaming_error = None
                             client_disconnected = False
@@ -597,7 +607,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     auth_manager=auth_manager,
                                     initial_response=response,
                                     request_messages=messages_for_tokenizer,
-                                    request_tools=tools_for_tokenizer
+                                    request_tools=tools_for_tokenizer,
+                                    usage_sink=usage_sink
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -617,6 +628,32 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - client disconnected")
                                 else:
                                     logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - completed")
+
+                                # 499 mirrors the nginx convention for a client-closed request.
+                                # An empty sink means the stream produced no usage data, which
+                                # record_request_usage records as zeros.
+                                if streaming_error:
+                                    recorded_status = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                                    recorded_error = str(streaming_error) or type(streaming_error).__name__
+                                elif client_disconnected:
+                                    recorded_status = 499
+                                    recorded_error = "Client disconnected during streaming"
+                                else:
+                                    recorded_status = 200
+                                    recorded_error = None
+                                await record_request_usage(
+                                    api_format="openai",
+                                    endpoint="/v1/chat/completions",
+                                    is_stream=True,
+                                    model=request_data.model,
+                                    status_code=recorded_status,
+                                    duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                                    resolved_model=model_resolution.normalized,
+                                    account_id=account.id,
+                                    usage=usage_sink,
+                                    error_message=recorded_error,
+                                )
+
                                 if debug_logger:
                                     if streaming_error:
                                         status_code = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
@@ -644,6 +681,18 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
                         
+                        await record_request_usage(
+                            api_format="openai",
+                            endpoint="/v1/chat/completions",
+                            is_stream=False,
+                            model=request_data.model,
+                            status_code=200,
+                            duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                            resolved_model=model_resolution.normalized,
+                            account_id=account.id,
+                            usage=openai_response.get("usage"),
+                        )
+
                         if debug_logger:
                             debug_logger.discard_buffers()
                         
@@ -673,6 +722,20 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         last_error_message = error_text
                         last_error_status = response.status_code
                     
+                    # Record the failed attempt before deciding whether to fail over,
+                    # so each account's error rate is visible per attempt.
+                    await record_request_usage(
+                        api_format="openai",
+                        endpoint="/v1/chat/completions",
+                        is_stream=bool(request_data.stream),
+                        model=request_data.model,
+                        status_code=response.status_code,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        error_message=last_error_message,
+                    )
+
                     # Classify error
                     error_type = classify_error(response.status_code, error_reason)
                     
@@ -728,6 +791,18 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     last_error_message = str(e.detail)
                     last_error_status = e.status_code
                     
+                    await record_request_usage(
+                        api_format="openai",
+                        endpoint="/v1/chat/completions",
+                        is_stream=bool(request_data.stream),
+                        model=request_data.model,
+                        status_code=e.status_code,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        error_message=last_error_message,
+                    )
+
                     # Single account - no point in failover, break immediately
                     if len(all_accounts) == 1:
                         break
@@ -820,6 +895,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         # Non-streaming mode: shared client for efficient connection reuse
         shared_client = request.app.state.http_client
         http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
+
+    attempt_started_at = time.perf_counter()
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)
         # Important: we wait for Kiro response BEFORE returning StreamingResponse,
@@ -862,6 +939,18 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             if debug_logger:
                 debug_logger.flush_on_error(response.status_code, error_message)
             
+            await record_request_usage(
+                api_format="openai",
+                endpoint="/v1/chat/completions",
+                is_stream=bool(request_data.stream),
+                model=request_data.model,
+                status_code=response.status_code,
+                duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                resolved_model=model_resolution.normalized,
+                account_id=account.id,
+                error_message=error_message,
+            )
+
             # Return error in OpenAI API format
             return JSONResponse(
                 status_code=response.status_code,
@@ -881,6 +970,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         
         if request_data.stream:
             # Streaming mode with first token retry
+            # Collects final token counts from the streaming generator so usage
+            # can be recorded once the stream completes.
+            usage_sink: Dict[str, Any] = {}
+
             async def stream_wrapper():
                 streaming_error = None
                 client_disconnected = False
@@ -900,7 +993,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         auth_manager=auth_manager,
                         initial_response=response,
                         request_messages=messages_for_tokenizer,
-                        request_tools=tools_for_tokenizer
+                        request_tools=tools_for_tokenizer,
+                        usage_sink=usage_sink
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -922,6 +1016,30 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - client disconnected")
                     else:
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (streaming) - completed")
+
+                    # 499 mirrors the nginx convention for a client-closed request.
+                    if streaming_error:
+                        recorded_status = streaming_error.status_code if isinstance(streaming_error, HTTPException) else 500
+                        recorded_error = str(streaming_error) or type(streaming_error).__name__
+                    elif client_disconnected:
+                        recorded_status = 499
+                        recorded_error = "Client disconnected during streaming"
+                    else:
+                        recorded_status = 200
+                        recorded_error = None
+                    await record_request_usage(
+                        api_format="openai",
+                        endpoint="/v1/chat/completions",
+                        is_stream=True,
+                        model=request_data.model,
+                        status_code=recorded_status,
+                        duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                        resolved_model=model_resolution.normalized,
+                        account_id=account.id,
+                        usage=usage_sink,
+                        error_message=recorded_error,
+                    )
+
                     # Write debug logs AFTER streaming completes
                     if debug_logger:
                         if streaming_error:
@@ -951,6 +1069,18 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             # Log access log for non-streaming success
             logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
             
+            await record_request_usage(
+                api_format="openai",
+                endpoint="/v1/chat/completions",
+                is_stream=False,
+                model=request_data.model,
+                status_code=200,
+                duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+                resolved_model=model_resolution.normalized,
+                account_id=account.id,
+                usage=openai_response.get("usage"),
+            )
+
             # Write debug logs after non-streaming request completes
             if debug_logger:
                 debug_logger.discard_buffers()
@@ -967,6 +1097,19 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         
         # Log access log for HTTP error
         logger.error(f"HTTP {e.status_code} - POST /v1/chat/completions - {e.detail}")
+
+        await record_request_usage(
+            api_format="openai",
+            endpoint="/v1/chat/completions",
+            is_stream=bool(request_data.stream),
+            model=request_data.model,
+            status_code=e.status_code,
+            duration_ms=(time.perf_counter() - attempt_started_at) * 1000,
+            resolved_model=model_resolution.normalized,
+            account_id=account.id,
+            error_message=str(e.detail),
+        )
+
         # Flush debug logs on HTTP error ("errors" mode)
         if debug_logger:
             debug_logger.flush_on_error(e.status_code, str(e.detail))

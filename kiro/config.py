@@ -594,6 +594,22 @@ ACCOUNTS_CONFIG_FILE: str = os.getenv("ACCOUNTS_CONFIG_FILE", "credentials.json"
 ACCOUNTS_STATE_FILE: str = os.getenv("ACCOUNTS_STATE_FILE", "state.json")
 
 # ==================================================================================================
+# Usage Tracking Settings
+# ==================================================================================================
+
+# Enable SQLite usage tracking for Grafana dashboards (default: false)
+USAGE_DB_ENABLED: bool = os.getenv("USAGE_DB_ENABLED", "false").lower() in ("true", "1", "yes")
+
+# Path to usage tracking database
+# Read directly from .env to avoid escape sequence issues on Windows
+# (e.g., \a in path D:\data\usage.db is interpreted as bell character)
+_raw_usage_db_path = _get_raw_env_value("USAGE_DB_PATH") or os.getenv("USAGE_DB_PATH", "")
+USAGE_DB_PATH: str = str(Path(_raw_usage_db_path)) if _raw_usage_db_path else "data/usage.db"
+
+# Interval for syncing the Grafana-readable copy, in seconds
+USAGE_DB_SYNC_INTERVAL: int = int(os.getenv("USAGE_DB_SYNC_INTERVAL", "30"))
+
+# ==================================================================================================
 # Circuit Breaker Settings
 # ==================================================================================================
 

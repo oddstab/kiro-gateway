@@ -30,7 +30,7 @@ Uses streaming_core.py for parsing Kiro stream into unified KiroEvent objects.
 
 import json
 import time
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, Awaitable, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Awaitable, Dict, Optional
 
 import httpx
 from fastapi import HTTPException
@@ -53,6 +53,7 @@ from kiro.streaming_core import (
     FirstTokenTimeoutError,
     KiroEvent,
     calculate_tokens_from_context_usage,
+    normalize_token_source,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
 )
 
@@ -80,7 +81,8 @@ async def stream_kiro_to_openai_internal(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    usage_sink: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Internal generator for converting Kiro stream to OpenAI format.
@@ -101,7 +103,10 @@ async def stream_kiro_to_openai_internal(
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
         conversation_id: Stable conversation ID for truncation recovery (optional)
-        conversation_id: Stable conversation ID for truncation recovery (optional)
+        usage_sink: Optional mutable dict filled with final token counts so the
+            caller (route handler) can record usage after the stream completes.
+            Left untouched on error paths and client disconnects, so an empty
+            sink signals that no usable usage data was produced.
     
     Yields:
         Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
@@ -472,6 +477,22 @@ async def stream_kiro_to_openai_internal(
         if metering_data:
             final_chunk["usage"]["credits_used"] = metering_data
         
+        # Expose final token counts to the caller for usage recording.
+        # clear() before update() is required, not stylistic: stream_with_first_token_retry
+        # may re-run this generator after a first token timeout, and the sink must end up
+        # holding only the final attempt's values instead of a blend of both attempts.
+        if usage_sink is not None:
+            usage_sink.clear()
+            usage_sink.update({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "context_usage_percentage": context_usage_percentage,
+                "credits_used": metering_data,
+                "token_source": normalize_token_source(total_source),
+                "finish_reason": finish_reason,
+            })
+
         # Log final token values being sent to client
         logger.debug(
             f"[Usage] {model}: "
@@ -522,7 +543,8 @@ async def stream_kiro_to_openai(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    usage_sink: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to OpenAI format.
@@ -538,6 +560,8 @@ async def stream_kiro_to_openai(
         auth_manager: Authentication manager
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
+        usage_sink: Optional mutable dict filled with final token counts
+            (see stream_kiro_to_openai_internal)
     
     Yields:
         Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
@@ -545,7 +569,8 @@ async def stream_kiro_to_openai(
     async for chunk in stream_kiro_to_openai_internal(
         client, response, model, model_cache, auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        usage_sink=usage_sink
     ):
         yield chunk
 
@@ -560,7 +585,8 @@ async def stream_with_first_token_retry(
     max_retries: int = FIRST_TOKEN_MAX_RETRIES,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    usage_sink: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout.
@@ -585,6 +611,9 @@ async def stream_with_first_token_retry(
         first_token_timeout: First token wait timeout (seconds)
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
+        usage_sink: Optional mutable dict filled with final token counts.
+            On retry the sink is fully overwritten, so it reflects only the
+            attempt that actually produced a response.
     
     Yields:
         Strings in SSE format
@@ -625,7 +654,8 @@ async def stream_with_first_token_retry(
             auth_manager,
             first_token_timeout=first_token_timeout,
             request_messages=request_messages,
-            request_tools=request_tools
+            request_tools=request_tools,
+            usage_sink=usage_sink
         ):
             yield chunk
     

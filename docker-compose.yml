@@ -34,7 +34,12 @@ services:
       - KIRO_REGION=${KIRO_REGION:-us-east-1}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEBUG_MODE=${DEBUG_MODE:-off}
-      
+
+      # Usage tracking (writes data/usage.db + data/usage-readonly.db for Grafana)
+      - USAGE_DB_ENABLED=${USAGE_DB_ENABLED:-false}
+      - USAGE_DB_PATH=${USAGE_DB_PATH:-data/usage.db}
+      - USAGE_DB_SYNC_INTERVAL=${USAGE_DB_SYNC_INTERVAL:-30}
+
       # VPN/Proxy settings (for restricted networks)
       - VPN_PROXY_URL=${VPN_PROXY_URL:-}
     
@@ -51,6 +56,9 @@ services:
       # Uncomment and adjust path as needed:
       # - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Linux/macOS
       
+      # Mount usage DB directory (holds usage.db and usage-readonly.db when tracking is enabled)
+      - ./data:/app/data
+
       # Mount debug logs directory (optional, for debugging)
       - ./debug_logs:/app/debug_logs
     
