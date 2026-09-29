@@ -98,7 +98,8 @@ tests/
 │   ├── test_parsers.py             # AwsEventStreamParser tests (JSON truncation diagnostics, truncation recovery integration)
 │   ├── test_routes_anthropic.py    # Anthropic API endpoint tests (/v1/messages, truncation recovery, WebSearch, Account System failover)
 │   ├── test_routes_openai.py       # OpenAI API endpoint tests (/v1/chat/completions, truncation recovery, WebSearch, Account System failover)
-│   ├── test_streaming_anthropic.py # Anthropic streaming response tests (truncation detection, stop_reason priority, initial_response reuse, usage_sink)
+│   ├── test_empty_response.py      # Empty-response classification and retry diagnostics tests
+│   ├── test_stop_reasons.py        # Stop reason mapping tests (Kiro → OpenAI/Anthropic conversion)
 │   ├── test_streaming_core.py      # Shared streaming logic tests (first-token retry, initial_response parameter)
 │   ├── test_streaming_openai.py    # OpenAI streaming response tests (truncation detection, finish_reason priority, initial_response reuse, usage_sink)
 │   ├── test_thinking_parser.py     # ThinkingParser tests (FSM for thinking blocks)

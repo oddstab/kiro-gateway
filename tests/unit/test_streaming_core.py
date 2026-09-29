@@ -1870,3 +1870,207 @@ class TestNativeReasoningStreaming:
         ]
         assert parser.native_reasoning_seen is True
         fake_parser.feed.assert_not_called()
+
+
+class TestStopReasonEvent:
+    """Tests for stop_reason event handling in unified stream layer."""
+
+    @pytest.mark.asyncio
+    async def test_kiro_event_stop_reason_field_defaults_to_none(self):
+        """
+        What it does: KiroEvent stop_reason defaults to None.
+        Goal: Ensure field exists and has correct default.
+        """
+        print("Setup: Creating KiroEvent without stop_reason...")
+        event = KiroEvent(type="content", content="Hello")
+
+        print(f"Comparing stop_reason: Expected None, Got {event.stop_reason}")
+        assert event.stop_reason is None
+
+    @pytest.mark.asyncio
+    async def test_kiro_event_stop_reason_can_be_set(self):
+        """
+        What it does: KiroEvent stop_reason can be set to a value.
+        Goal: Ensure field can hold stop reason values.
+        """
+        print("Setup: Creating KiroEvent with stop_reason...")
+        event = KiroEvent(type="stop_reason", stop_reason="MAX_TOKENS")
+
+        print(f"Comparing stop_reason: Expected 'MAX_TOKENS', Got {event.stop_reason}")
+        assert event.stop_reason == "MAX_TOKENS"
+
+    @pytest.mark.asyncio
+    async def test_stream_result_stop_reason_field_defaults_to_none(self):
+        """
+        What it does: StreamResult stop_reason defaults to None.
+        Goal: Ensure field exists and has correct default.
+        """
+        print("Setup: Creating StreamResult without stop_reason...")
+        result = StreamResult()
+
+        print(f"Comparing stop_reason: Expected None, Got {result.stop_reason}")
+        assert result.stop_reason is None
+
+    @pytest.mark.asyncio
+    async def test_process_chunk_yields_stop_reason_event(self):
+        """
+        What it does: _process_chunk yields KiroEvent for stop_reason parser event.
+        Goal: Ensure stop_reason events are converted to KiroEvent.
+        """
+        print("Setup: Mock parser with stop_reason event...")
+        parser = MagicMock()
+        parser.feed.return_value = [
+            {"type": "stop_reason", "data": "END_TURN"}
+        ]
+
+        print("Action: Processing chunk...")
+        events = [
+            event
+            async for event in _process_chunk(
+                parser,
+                b"chunk",
+                None,
+                WebSearchParser(),
+            )
+        ]
+
+        print(f"Comparing events: Expected 1, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0].type == "stop_reason"
+        assert events[0].stop_reason == "END_TURN"
+
+    @pytest.mark.asyncio
+    async def test_process_chunk_stop_reason_with_other_events(self):
+        """
+        What it does: _process_chunk handles stop_reason mixed with other events.
+        Goal: Ensure stop_reason doesn't interfere with content, usage, etc.
+        """
+        print("Setup: Mock parser with mixed events...")
+        parser = MagicMock()
+        parser.feed.return_value = [
+            {"type": "content", "data": "Response text"},
+            {"type": "stop_reason", "data": "END_TURN"},
+            {"type": "usage", "data": 150},
+        ]
+
+        print("Action: Processing chunk...")
+        events = [
+            event
+            async for event in _process_chunk(
+                parser,
+                b"chunk",
+                None,
+                WebSearchParser(),
+            )
+        ]
+
+        print(f"Comparing events count: Expected 3, Got {len(events)}")
+        assert len(events) == 3
+        assert events[0].type == "content"
+        assert events[1].type == "stop_reason"
+        assert events[1].stop_reason == "END_TURN"
+        assert events[2].type == "usage"
+
+    @pytest.mark.asyncio
+    async def test_collect_stream_to_result_records_stop_reason(self):
+        """
+        What it does: collect_stream_to_result records stop_reason in StreamResult.
+        Goal: Ensure stop_reason is accumulated into result.
+        """
+        print("Setup: Creating mock response with stop_reason event...")
+        response = AsyncMock()
+        response.aiter_bytes = AsyncMock()
+        response.aiter_bytes.return_value = None
+
+        # Mock the parser to return a stop_reason event
+        with patch('kiro.streaming_core.parse_kiro_stream') as mock_parse:
+            async def mock_events():
+                yield KiroEvent(type="content", content="Hello")
+                yield KiroEvent(type="stop_reason", stop_reason="MAX_TOKENS")
+
+            mock_parse.return_value = mock_events()
+
+            print("Action: Collecting stream to result...")
+            result = await collect_stream_to_result(response)
+
+            print(f"Comparing stop_reason: Expected 'MAX_TOKENS', Got {result.stop_reason}")
+            assert result.stop_reason == "MAX_TOKENS"
+            assert result.content == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_collect_stream_to_result_last_non_empty_stop_reason_wins(self):
+        """
+        What it does: Last non-empty stop_reason wins when multiple appear.
+        Goal: Ensure last-one-wins semantics for stop_reason.
+        """
+        print("Setup: Multiple stop_reason events...")
+        response = AsyncMock()
+
+        with patch('kiro.streaming_core.parse_kiro_stream') as mock_parse:
+            async def mock_events():
+                yield KiroEvent(type="stop_reason", stop_reason="TOOL_USE")
+                yield KiroEvent(type="content", content="Response")
+                yield KiroEvent(type="stop_reason", stop_reason="END_TURN")
+
+            mock_parse.return_value = mock_events()
+
+            print("Action: Collecting stream...")
+            result = await collect_stream_to_result(response)
+
+            print(f"Comparing stop_reason: Expected 'END_TURN' (last), Got {result.stop_reason}")
+            assert result.stop_reason == "END_TURN"
+
+    @pytest.mark.asyncio
+    async def test_collect_stream_to_result_ignores_empty_stop_reason(self):
+        """
+        What it does: Empty stop_reason events are not recorded.
+        Goal: Ensure only non-empty stop_reason is recorded.
+        """
+        print("Setup: Empty stop_reason event...")
+        response = AsyncMock()
+
+        with patch('kiro.streaming_core.parse_kiro_stream') as mock_parse:
+            async def mock_events():
+                yield KiroEvent(type="stop_reason", stop_reason="")
+                yield KiroEvent(type="content", content="Response")
+
+            mock_parse.return_value = mock_events()
+
+            print("Action: Collecting stream...")
+            result = await collect_stream_to_result(response)
+
+            print(f"Comparing stop_reason: Expected None (empty was skipped), Got {result.stop_reason}")
+            assert result.stop_reason is None
+
+    @pytest.mark.asyncio
+    async def test_collect_stream_to_result_all_known_stop_reasons(self):
+        """
+        What it does: collect_stream_to_result handles all known stop reasons.
+        Goal: Ensure no stop reason is lost in collection.
+        """
+        print("Setup: All known stop reasons...")
+        known_reasons = [
+            "END_TURN",
+            "TOOL_USE",
+            "MAX_TOKENS",
+            "STOP_SEQUENCE",
+            "CONTENT_FILTERED",
+            "GUARDRAIL_INTERVENED",
+        ]
+
+        print("Action: Testing each reason...")
+        for reason in known_reasons:
+            response = AsyncMock()
+
+            with patch('kiro.streaming_core.parse_kiro_stream') as mock_parse:
+                async def mock_events():
+                    yield KiroEvent(type="stop_reason", stop_reason=reason)
+
+                mock_parse.return_value = mock_events()
+
+                print(f"  Testing {reason}...")
+                result = await collect_stream_to_result(response)
+
+                assert result.stop_reason == reason
+
+        print("✓ All known stop reasons recorded correctly")

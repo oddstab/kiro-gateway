@@ -315,6 +315,132 @@ class TestFakeReasoningConfig:
         importlib.reload(config_module)
 
 
+class TestEmptyResponseRecoveryConfig:
+    """Tests for empty-response recovery configuration."""
+
+    def test_empty_response_recovery_defaults(
+        self: "TestEmptyResponseRecoveryConfig",
+    ) -> None:
+        """
+        What it does: Loads empty-response recovery settings with no overrides.
+        Purpose: Keep the bounded retry and backward-compatible defaults stable.
+        """
+        import importlib
+        import kiro.config as config_module
+
+        original_getenv = os.getenv
+
+        def mock_getenv(key: str, default: object = None) -> object:
+            if key in {"EMPTY_RESPONSE_RETRIES", "EMPTY_RESPONSE_ON_EXHAUSTED"}:
+                return default
+            return original_getenv(key, default)
+
+        with patch.object(os, "getenv", side_effect=mock_getenv):
+            importlib.reload(config_module)
+            assert config_module.EMPTY_RESPONSE_RETRIES == 2
+            assert config_module.EMPTY_RESPONSE_ON_EXHAUSTED == "passthrough"
+
+        importlib.reload(config_module)
+
+    @pytest.mark.parametrize(
+        ("configured_retries", "expected_retries"),
+        [("5", 5), ("0", 0)],
+    )
+    def test_empty_response_retries_accepts_valid_non_negative_values(
+        self: "TestEmptyResponseRecoveryConfig",
+        configured_retries: str,
+        expected_retries: int,
+    ) -> None:
+        """
+        What it does: Loads valid retry values, including the disabled value.
+        Purpose: Permit bounded retries and explicit pre-feature behavior.
+        """
+        import importlib
+        import kiro.config as config_module
+
+        with patch.dict(
+            os.environ,
+            {"EMPTY_RESPONSE_RETRIES": configured_retries},
+            clear=False,
+        ):
+            importlib.reload(config_module)
+            assert config_module.EMPTY_RESPONSE_RETRIES == expected_retries
+
+        importlib.reload(config_module)
+
+    @pytest.mark.parametrize("configured_retries", ["-1", "not-a-number"])
+    def test_empty_response_retries_invalid_values_fall_back_to_default(
+        self: "TestEmptyResponseRecoveryConfig",
+        configured_retries: str,
+    ) -> None:
+        """
+        What it does: Loads invalid retry values.
+        Purpose: Ensure startup remains safe and emits a diagnostic warning.
+        """
+        import importlib
+        import kiro.config as config_module
+
+        with patch.dict(
+            os.environ,
+            {"EMPTY_RESPONSE_RETRIES": configured_retries},
+            clear=False,
+        ):
+            with patch.object(config_module.logger, "warning") as mock_warning:
+                importlib.reload(config_module)
+                assert config_module.EMPTY_RESPONSE_RETRIES == 2
+
+        assert mock_warning.called
+        importlib.reload(config_module)
+
+    @pytest.mark.parametrize(
+        ("configured_value", "expected_value"),
+        [("error", "error"), (" PASSTHROUGH ", "passthrough")],
+    )
+    def test_empty_response_on_exhausted_accepts_documented_values(
+        self: "TestEmptyResponseRecoveryConfig",
+        configured_value: str,
+        expected_value: str,
+    ) -> None:
+        """
+        What it does: Loads documented exhausted-response behaviors.
+        Purpose: Ensure values are case-insensitive and whitespace-tolerant.
+        """
+        import importlib
+        import kiro.config as config_module
+
+        with patch.dict(
+            os.environ,
+            {"EMPTY_RESPONSE_ON_EXHAUSTED": configured_value},
+            clear=False,
+        ):
+            importlib.reload(config_module)
+            assert config_module.EMPTY_RESPONSE_ON_EXHAUSTED == expected_value
+
+        importlib.reload(config_module)
+
+    def test_empty_response_on_exhausted_unknown_value_falls_back(
+        self: "TestEmptyResponseRecoveryConfig",
+    ) -> None:
+        """
+        What it does: Loads an unsupported exhausted-response behavior.
+        Purpose: Preserve backward compatibility with a warning instead of failing startup.
+        """
+        import importlib
+        import kiro.config as config_module
+
+        with patch.dict(
+            os.environ,
+            {"EMPTY_RESPONSE_ON_EXHAUSTED": "retry"},
+            clear=False,
+        ):
+            with patch.object(config_module.logger, "warning") as mock_warning:
+                importlib.reload(config_module)
+                assert config_module.EMPTY_RESPONSE_ON_EXHAUSTED == "passthrough"
+
+        assert mock_warning.called
+        importlib.reload(config_module)
+
+
 class TestAwsSsoOidcUrlConfig:
     """Tests for AWS SSO OIDC URL configuration."""
     

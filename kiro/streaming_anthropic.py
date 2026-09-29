@@ -34,12 +34,13 @@ Reference: https://docs.anthropic.com/en/api/messages-streaming
 import json
 import time
 import uuid
-from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional, Any
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 from fastapi import HTTPException
 from loguru import logger
 
+from kiro.empty_response import EmptyResponseError, classify_turn
 from kiro.streaming_core import (
     parse_kiro_stream,
     collect_stream_to_result,
@@ -47,12 +48,20 @@ from kiro.streaming_core import (
     KiroEvent,
     calculate_tokens_from_context_usage,
     normalize_token_source,
+    stream_with_empty_response_retry,
     stream_with_first_token_retry,
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.mcp_tools import client_provides_web_search
-from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
+from kiro.config import (
+    EMPTY_RESPONSE_ON_EXHAUSTED,
+    EMPTY_RESPONSE_RETRIES,
+    FAKE_REASONING_HANDLING,
+    FIRST_TOKEN_MAX_RETRIES,
+    FIRST_TOKEN_TIMEOUT,
+)
+from kiro.stop_reasons import resolve_finish_reason
 
 if TYPE_CHECKING:
     from kiro.auth import KiroAuthManager
@@ -139,7 +148,10 @@ async def stream_kiro_to_anthropic(
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
     conversation_id: Optional[str] = None,
-    usage_sink: Optional[Dict[str, Any]] = None
+    usage_sink: Optional[Dict[str, Any]] = None,
+    *,
+    empty_detection_enabled: bool = False,
+    on_empty_response: Optional[Callable[[EmptyResponseError], None]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to Anthropic SSE format.
@@ -162,12 +174,20 @@ async def stream_kiro_to_anthropic(
             Uses the same key names as the OpenAI streaming path so callers have
             a single shape to consume. Left untouched on error paths and client
             disconnects, so an empty sink signals no usable usage data.
+        empty_detection_enabled: Whether to raise EmptyResponseError for a
+            completed turn with no client-visible text or tool blocks. The
+            outer retry wrapper disables this for its final attempt.
+        on_empty_response: Optional callback invoked after classifying an empty
+            turn and before raising EmptyResponseError. The wrapper uses it to
+            retain diagnostics for an exhausted error policy.
     
     Yields:
         Strings in Anthropic SSE format
     
     Raises:
         FirstTokenTimeoutError: If first token not received within timeout
+        EmptyResponseError: If empty-response detection is enabled and the
+            completed turn has no client-visible result.
     """
     message_id = generate_message_id()
     input_tokens = 0
@@ -211,6 +231,9 @@ async def stream_kiro_to_anthropic(
     context_usage_percentage: Optional[float] = None
     upstream_cache_usage: Dict[str, int] = {}
     
+    # Upstream stop reason from Kiro metadataEvent (last non-empty value wins)
+    upstream_stop_reason: Optional[str] = None
+
     # Track truncated tool calls for recovery
     truncated_tools: List[Dict[str, Any]] = []
     
@@ -634,6 +657,9 @@ async def stream_kiro_to_anthropic(
                 context_usage_percentage = event.context_usage_percentage
             elif event.type == "usage" and event.usage:
                 upstream_cache_usage.update(_extract_cache_usage_fields(event.usage))
+            elif event.type == "stop_reason" and event.stop_reason:
+                # Capture upstream Kiro stop reason; last non-empty value wins
+                upstream_stop_reason = event.stop_reason
         
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
@@ -719,9 +745,11 @@ async def stream_kiro_to_anthropic(
             })
         
         # Detect content truncation (missing completion signals)
+        # Count both text and thinking output: a reasoning-only turn that dies
+        # mid-stream would have len(full_content) == 0 but full_thinking_content > 0.
         content_was_truncated = (
             not stream_completed_normally and
-            len(full_content) > 0 and
+            (len(full_content) > 0 or len(full_thinking_content) > 0) and
             not tool_blocks  # Don't confuse with tool call truncation
         )
         
@@ -747,13 +775,47 @@ async def stream_kiro_to_anthropic(
                 input_tokens = prompt_tokens
                 token_source = prompt_source
         
-        # Determine stop reason (truncation has highest priority)
-        if content_was_truncated:
-            stop_reason = "max_tokens"
-        elif tool_blocks:
-            stop_reason = "tool_use"
-        else:
-            stop_reason = "end_turn"
+        # Determine stop reason using the shared resolver.
+        # Precedence: local truncation > mapped upstream value > local inference.
+        stop_reason = resolve_finish_reason(
+            kiro_stop_reason=upstream_stop_reason,
+            truncated_value="max_tokens",
+            tool_calls_value="tool_use",
+            default_value="end_turn",
+            was_truncated=content_was_truncated,
+            has_tool_calls=bool(tool_blocks),
+            api_label="anthropic",
+        )
+
+        # Empty-response detection runs before message_delta / message_stop and
+        # before the truncation-recovery bookkeeping below, so a discarded
+        # attempt leaves neither a terminal event nor persisted state behind.
+        if empty_detection_enabled or on_empty_response is not None:
+            empty_reason = classify_turn(
+                content=full_content,
+                thinking_content=full_thinking_content,
+                tool_calls=tool_blocks,
+                kiro_stop_reason=upstream_stop_reason,
+                was_truncated=content_was_truncated,
+            )
+            if empty_reason is not None:
+                # Drop this attempt's usage so the caller never records numbers
+                # from a turn that is about to be discarded or reported empty.
+                if usage_sink is not None:
+                    usage_sink.clear()
+                empty_error = EmptyResponseError(
+                    reason=empty_reason,
+                    had_reasoning=bool(full_thinking_content.strip()),
+                    content_len=len(full_content),
+                    tool_call_count=len(tool_blocks),
+                    kiro_stop_reason=upstream_stop_reason,
+                    completion_tokens=output_tokens,
+                    model=model,
+                )
+                if on_empty_response is not None:
+                    on_empty_response(empty_error)
+                if empty_detection_enabled:
+                    raise empty_error
         
         # Send message_delta with stop_reason and usage
         usage_payload = {
@@ -827,6 +889,8 @@ async def stream_kiro_to_anthropic(
         )
         
     except FirstTokenTimeoutError:
+        raise
+    except EmptyResponseError:
         raise
     except GeneratorExit:
         logger.debug("Client disconnected (GeneratorExit)")
@@ -971,9 +1035,11 @@ async def collect_anthropic_response(
     
     # Detect content truncation (missing completion signals)
     stream_completed_normally = result.context_usage_percentage is not None
+    # Count both text and thinking output: a reasoning-only turn that dies
+    # mid-stream would have len(result.content) == 0 but result.thinking_content > 0.
     content_was_truncated = (
         not stream_completed_normally and
-        len(result.content) > 0 and
+        (len(result.content) > 0 or len(result.thinking_content) > 0) and
         not result.tool_calls  # Don't confuse with tool call truncation
     )
     
@@ -985,13 +1051,17 @@ async def collect_anthropic_response(
             f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
         )
     
-    # Determine stop reason (truncation has highest priority)
-    if content_was_truncated:
-        stop_reason = "max_tokens"
-    elif result.tool_calls:
-        stop_reason = "tool_use"
-    else:
-        stop_reason = "end_turn"
+    # Determine stop reason using the shared resolver.
+    # Precedence: local truncation > mapped upstream value > local inference.
+    stop_reason = resolve_finish_reason(
+        kiro_stop_reason=result.stop_reason,
+        truncated_value="max_tokens",
+        tool_calls_value="tool_use",
+        default_value="end_turn",
+        was_truncated=content_was_truncated,
+        has_tool_calls=bool(result.tool_calls),
+        api_label="anthropic",
+    )
     
     logger.debug(
         f"[Anthropic Non-Streaming] Completed: "
@@ -1018,7 +1088,7 @@ async def collect_anthropic_response(
 
 
 async def stream_with_first_token_retry_anthropic(
-    make_request,
+    make_request: Callable[[], Awaitable[httpx.Response]],
     model: str,
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
@@ -1028,38 +1098,37 @@ async def stream_with_first_token_retry_anthropic(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
-    usage_sink: Optional[Dict[str, Any]] = None
+    usage_sink: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[str, None]:
     """
-    Streaming with automatic retry on first token timeout for Anthropic API.
-    
-    If model doesn't respond within first_token_timeout seconds,
-    request is cancelled and a new one is made. Maximum max_retries attempts.
-    
-    This is seamless for user - they just see a delay,
-    but eventually get a response (or error after all attempts).
-    
+    Stream Anthropic SSE with first-token and empty-response retries.
+
+    Each empty-response attempt receives its own first-token retry budget. The
+    optional pre-validated response is consumed only by the first attempt;
+    every later empty-response attempt creates a fresh HTTP request.
+
     Args:
-        make_request: Function to create new HTTP request
-        model: Model name
-        model_cache: Model cache
-        auth_manager: Authentication manager
-        initial_response: Optional pre-validated response to use on first attempt.
-                         If provided, make_request is only called on retries.
-        max_retries: Maximum number of attempts
-        first_token_timeout: First token wait timeout (seconds)
-        request_messages: Original request messages (for fallback token counting)
-        request_tools: Original request tools (for fallback token counting)
-        request_system: Original system prompt (for fallback token counting)
-        usage_sink: Optional mutable dict filled with final token counts.
-            On retry the sink is fully overwritten, so it reflects only the
-            attempt that actually produced a response.
-    
+        make_request: Async factory that creates a new streaming HTTP response.
+        model: Model name.
+        model_cache: Model cache.
+        auth_manager: Authentication manager.
+        initial_response: Optional pre-validated response for the first attempt.
+        max_retries: Maximum first-token attempts allowed per empty-response
+            attempt.
+        first_token_timeout: First-token wait timeout in seconds.
+        request_messages: Original request messages for fallback token counting.
+        request_tools: Original request tools for fallback token counting.
+        request_system: Original system prompt for fallback token counting.
+        usage_sink: Optional mutable dict filled with final token counts. It is
+            cleared before each retryable empty-response attempt so discarded
+            attempts cannot leave stale usage data.
+
     Yields:
-        Strings in Anthropic SSE format
-    
+        Strings in Anthropic SSE format.
+
     Raises:
-        Exception with Anthropic error format after exhausting all attempts
+        HTTPException: For upstream HTTP errors, exhausted first-token retries,
+            or an exhausted empty-response budget configured to return an error.
     """
     def create_http_error(status_code: int, error_text: str) -> HTTPException:
         """Create an HTTP error before streaming response headers are sent."""
@@ -1074,29 +1143,95 @@ async def stream_with_first_token_retry_anthropic(
             status_code=504,
             detail=f"Model did not respond within {timeout}s after {retries} attempts. Please try again.",
         )
-    
-    async def stream_processor(response: httpx.Response) -> AsyncGenerator[str, None]:
-        """Process response and yield Anthropic SSE chunks."""
-        async for chunk in stream_kiro_to_anthropic(
-            response,
-            model,
-            model_cache,
-            auth_manager,
+
+    def create_empty_response_error(
+        attempts: int,
+        error: EmptyResponseError,
+    ) -> HTTPException:
+        """Create an actionable error after all empty-response attempts fail."""
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "Model completed without visible content or tool use after "
+                f"{attempts} attempts. Please try again. "
+                f"Reason: {error.reason}."
+            ),
+        )
+
+    def capture_empty_response(
+        error: EmptyResponseError,
+        is_final_attempt: bool,
+    ) -> None:
+        """Raise the configured error after a final empty response."""
+        if (
+            empty_response_retries_enabled
+            and is_final_attempt
+            and EMPTY_RESPONSE_ON_EXHAUSTED == "error"
+        ):
+            raise create_empty_response_error(empty_response_max_attempts, error)
+
+    empty_response_retries_enabled = EMPTY_RESPONSE_RETRIES > 0
+    empty_response_max_attempts = (
+        EMPTY_RESPONSE_RETRIES + 1 if empty_response_retries_enabled else 1
+    )
+    available_initial_response = initial_response
+
+    async def attempt_runner(
+        _attempt_number: int,
+        is_final_attempt: bool,
+    ) -> AsyncGenerator[str, None]:
+        """Run one empty-response attempt with a fresh first-token budget."""
+        nonlocal available_initial_response
+
+        attempt_initial_response = available_initial_response
+        available_initial_response = None
+        if empty_response_retries_enabled and usage_sink is not None:
+            usage_sink.clear()
+
+        async def stream_processor(response: httpx.Response) -> AsyncGenerator[str, None]:
+            """Process one response with the current empty-response policy."""
+
+            detect_empty_response = empty_response_retries_enabled and not is_final_attempt
+
+            def on_empty_response(error: EmptyResponseError) -> None:
+                """Apply the exhausted empty-response policy for this attempt."""
+                capture_empty_response(error, is_final_attempt)
+
+            async for chunk in stream_kiro_to_anthropic(
+                response,
+                model,
+                model_cache,
+                auth_manager,
+                first_token_timeout=first_token_timeout,
+                request_messages=request_messages,
+                request_tools=request_tools,
+                request_system=request_system,
+                usage_sink=usage_sink,
+                empty_detection_enabled=detect_empty_response,
+                on_empty_response=(
+                    on_empty_response
+                    if empty_response_retries_enabled
+                    else None
+                ),
+            ):
+                yield chunk
+
+        async for chunk in stream_with_first_token_retry(
+            make_request=make_request,
+            stream_processor=stream_processor,
+            initial_response=attempt_initial_response,
+            max_retries=max_retries,
             first_token_timeout=first_token_timeout,
-            request_messages=request_messages,
-            request_tools=request_tools,
-            request_system=request_system,
-            usage_sink=usage_sink,
+            on_http_error=create_http_error,
+            on_all_retries_failed=create_timeout_error,
         ):
             yield chunk
-    
-    async for chunk in stream_with_first_token_retry(
-        make_request=make_request,
-        stream_processor=stream_processor,
-        initial_response=initial_response,
-        max_retries=max_retries,
-        first_token_timeout=first_token_timeout,
-        on_http_error=create_http_error,
-        on_all_retries_failed=create_timeout_error,
-    ):
-        yield chunk
+
+    try:
+        async for chunk in stream_with_empty_response_retry(
+            attempt_runner=attempt_runner,
+            max_attempts=empty_response_max_attempts,
+        ):
+            yield chunk
+    except EmptyResponseError:
+        raise

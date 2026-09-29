@@ -29,9 +29,52 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
+from loguru import logger
 
 # Load environment variables
 load_dotenv()
+
+# ==================================================================================================
+# Empty Response Recovery Settings
+# ==================================================================================================
+
+# Number of resamples for completed turns with no visible content or tool calls.
+# Zero disables empty-response recovery and restores pre-feature behavior.
+_EMPTY_RESPONSE_RETRIES_DEFAULT: int = 2
+_EMPTY_RESPONSE_RETRIES_RAW: str = os.getenv(
+    "EMPTY_RESPONSE_RETRIES", str(_EMPTY_RESPONSE_RETRIES_DEFAULT)
+)
+try:
+    EMPTY_RESPONSE_RETRIES: int = int(_EMPTY_RESPONSE_RETRIES_RAW)
+except (TypeError, ValueError):
+    logger.warning(
+        "Invalid EMPTY_RESPONSE_RETRIES value {!r}; using default {}.",
+        _EMPTY_RESPONSE_RETRIES_RAW,
+        _EMPTY_RESPONSE_RETRIES_DEFAULT,
+    )
+    EMPTY_RESPONSE_RETRIES = _EMPTY_RESPONSE_RETRIES_DEFAULT
+else:
+    if EMPTY_RESPONSE_RETRIES < 0:
+        logger.warning(
+            "Invalid negative EMPTY_RESPONSE_RETRIES value {!r}; using default {}.",
+            _EMPTY_RESPONSE_RETRIES_RAW,
+            _EMPTY_RESPONSE_RETRIES_DEFAULT,
+        )
+        EMPTY_RESPONSE_RETRIES = _EMPTY_RESPONSE_RETRIES_DEFAULT
+
+# Outcome after the empty-response retry budget is exhausted.
+# "passthrough" preserves current behavior; "error" returns a readable error.
+_EMPTY_RESPONSE_ON_EXHAUSTED_RAW: str = os.getenv(
+    "EMPTY_RESPONSE_ON_EXHAUSTED", "passthrough"
+).strip().lower()
+if _EMPTY_RESPONSE_ON_EXHAUSTED_RAW in ("passthrough", "error"):
+    EMPTY_RESPONSE_ON_EXHAUSTED: str = _EMPTY_RESPONSE_ON_EXHAUSTED_RAW
+else:
+    logger.warning(
+        "Invalid EMPTY_RESPONSE_ON_EXHAUSTED value {!r}; using 'passthrough'.",
+        _EMPTY_RESPONSE_ON_EXHAUSTED_RAW,
+    )
+    EMPTY_RESPONSE_ON_EXHAUSTED: str = "passthrough"
 
 
 def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
