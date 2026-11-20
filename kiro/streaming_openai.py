@@ -37,6 +37,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.stop_reasons import resolve_finish_reason
 from kiro.utils import generate_completion_id
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
@@ -82,17 +83,27 @@ async def stream_kiro_to_openai_internal(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     conversation_id: Optional[str] = None,
-    usage_sink: Optional[Dict[str, Any]] = None
+    usage_sink: Optional[Dict[str, Any]] = None,
+    *,
+    empty_detection_enabled: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Internal generator for converting Kiro stream to OpenAI format.
-    
+
     Parses AWS SSE stream and converts events to OpenAI chat.completion.chunk.
     Supports tool calls and usage calculation.
-    
+
     IMPORTANT: This function raises FirstTokenTimeoutError if first token
     is not received within first_token_timeout seconds.
-    
+
+    When ``empty_detection_enabled`` is True, the function classifies the
+    completed turn before emitting any terminal event (tool-calls chunk,
+    final chunk, or ``[DONE]``). A reasoning-only or no-visible-content turn
+    raises :class:`kiro.empty_response.EmptyResponseError` so that the outer
+    :func:`stream_with_empty_response_retry` wrapper can resample. The raise
+    guarantees that no terminal SSE event has been sent to the client and
+    ``usage_sink`` has not been written, so a fresh attempt starts cleanly.
+
     Args:
         client: HTTP client (for connection management)
         response: HTTP response with data stream
@@ -107,18 +118,26 @@ async def stream_kiro_to_openai_internal(
             caller (route handler) can record usage after the stream completes.
             Left untouched on error paths and client disconnects, so an empty
             sink signals that no usable usage data was produced.
-    
+        empty_detection_enabled: When True, raise EmptyResponseError for a
+            completed turn with no client-visible content or tool calls instead
+            of delivering it. Must be False on the final attempt so degenerate
+            turns are always delivered rather than permanently failing.
+
     Yields:
-        Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
-    
+        Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n".
+        In ``as_reasoning_content`` mode, thinking deltas may also contain
+        ``reasoning_signature`` when Kiro provides one.
+
     Raises:
         FirstTokenTimeoutError: If first token not received within timeout
-    
+        EmptyResponseError: If the turn has no visible content and
+            ``empty_detection_enabled`` is True.
+
     Example:
         >>> async for chunk in stream_kiro_to_openai_internal(client, response, "claude-sonnet-4", cache, auth):
         ...     print(chunk)
         data: {"id":"chatcmpl-...","object":"chat.completion.chunk",...}
-        
+
         data: [DONE]
     """
     completion_id = generate_completion_id()
@@ -127,8 +146,11 @@ async def stream_kiro_to_openai_internal(
     
     metering_data = None
     context_usage_percentage = None
+    # Upstream stop reason from Kiro metadataEvent (last non-empty value wins)
+    upstream_stop_reason: Optional[str] = None
     full_content = ""
     full_thinking_content = ""  # Accumulated thinking content for non-streaming
+    last_reasoning_signature: Optional[str] = None
     
     streaming_error_occurred = False
     tool_calls_from_stream = []
@@ -182,7 +204,14 @@ async def stream_kiro_to_openai_internal(
                 # Send as reasoning_content or content based on mode
                 if FAKE_REASONING_HANDLING == "as_reasoning_content":
                     delta = {"reasoning_content": event.thinking_content}
+                    if event.reasoning_signature:
+                        if last_reasoning_signature is None:
+                            logger.debug("Captured reasoning signature from Kiro stream")
+                        last_reasoning_signature = event.reasoning_signature
+                        delta["reasoning_signature"] = last_reasoning_signature
                 else:
+                    # Folded thinking is plain content, so it has no structured
+                    # reasoning channel where a signature can be represented.
                     delta = {"content": event.thinking_content}
                 
                 openai_chunk = {
@@ -339,6 +368,9 @@ async def stream_kiro_to_openai_internal(
             
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
+
+            elif event.type == "stop_reason" and event.stop_reason:
+                upstream_stop_reason = event.stop_reason
         
         # Track completion signals for truncation detection
         received_usage = metering_data is not None
@@ -353,7 +385,7 @@ async def stream_kiro_to_openai_internal(
         # Detect content truncation (missing completion signals)
         content_was_truncated = (
             not stream_completed_normally and
-            len(full_content) > 0 and
+            len(full_content) + len(full_thinking_content) > 0 and
             not all_tool_calls  # Don't confuse with tool call truncation
         )
         
@@ -365,13 +397,16 @@ async def stream_kiro_to_openai_internal(
                 f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
             )
         
-        # Determine finish_reason (truncation has highest priority)
-        if content_was_truncated:
-            finish_reason = "length"
-        elif all_tool_calls:
-            finish_reason = "tool_calls"
-        else:
-            finish_reason = "stop"
+        # Determine finish_reason from local truncation, upstream metadata, and local inference
+        finish_reason = resolve_finish_reason(
+            upstream_stop_reason,
+            truncated_value="length",
+            tool_calls_value="tool_calls",
+            default_value="stop",
+            was_truncated=content_was_truncated,
+            has_tool_calls=bool(all_tool_calls),
+            api_label="openai",
+        )
         
         # Count completion_tokens (output) using tiktoken
         completion_tokens = count_tokens(full_content + full_thinking_content)
@@ -394,6 +429,32 @@ async def stream_kiro_to_openai_internal(
             prompt_source = "tiktoken"
             total_source = "tiktoken"
         
+        # Empty-response detection: raise before any terminal event so the outer
+        # stream_with_empty_response_retry wrapper can resample cleanly.
+        # Truncation-recovery bookkeeping, usage_sink, tool-calls chunk, final
+        # chunk, and [DONE] are all intentionally below this block so that a
+        # discarded attempt never leaves partial state in the client stream.
+        if empty_detection_enabled:
+            from kiro.empty_response import classify_turn, EmptyResponseError
+
+            empty_reason = classify_turn(
+                content=full_content,
+                thinking_content=full_thinking_content,
+                tool_calls=all_tool_calls if all_tool_calls else None,
+                kiro_stop_reason=upstream_stop_reason,
+                was_truncated=content_was_truncated,
+            )
+            if empty_reason is not None:
+                raise EmptyResponseError(
+                    reason=empty_reason,
+                    had_reasoning=bool(full_thinking_content.strip()),
+                    content_len=len(full_content),
+                    tool_call_count=len(all_tool_calls),
+                    kiro_stop_reason=upstream_stop_reason,
+                    completion_tokens=completion_tokens,
+                    model=model,
+                )
+
         # Send tool calls if present
         if all_tool_calls:
             logger.debug(f"Processing {len(all_tool_calls)} tool calls for streaming response")
@@ -564,7 +625,8 @@ async def stream_kiro_to_openai(
             (see stream_kiro_to_openai_internal)
     
     Yields:
-        Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
+        Strings in SSE format. In ``as_reasoning_content`` mode, thinking
+        deltas may include ``reasoning_signature`` when Kiro provides one.
     """
     async for chunk in stream_kiro_to_openai_internal(
         client, response, model, model_cache, auth_manager,
@@ -586,41 +648,63 @@ async def stream_with_first_token_retry(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    usage_sink: Optional[Dict[str, Any]] = None
+    usage_sink: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[str, None]:
     """
-    Streaming with automatic retry on first token timeout.
-    
-    If model doesn't respond within first_token_timeout seconds,
-    request is cancelled and a new one is made. Maximum max_retries attempts.
-    
-    This is seamless for user - they just see a delay,
-    but eventually get a response (or error after all attempts).
-    
-    Uses generic stream_with_first_token_retry from streaming_core.py.
-    
+    Streaming with automatic retry on first token timeout and empty responses.
+
+    Wraps two independent retry budgets:
+
+    - **Outer** (:func:`~kiro.streaming_core.stream_with_empty_response_retry`):
+      resamples completed turns that had no client-visible content (e.g.
+      reasoning-only turns).  Budget is ``EMPTY_RESPONSE_RETRIES + 1`` total
+      attempts.  Zero disables detection and leaves behavior identical to the
+      pre-feature baseline.
+
+    - **Inner** (:func:`~kiro.streaming_core.stream_with_first_token_retry_core`):
+      retries when the model is slow to emit its first token.  Each
+      empty-response attempt gets its own fresh first-token-timeout budget,
+      because an empty completion and a dead connection are different failures.
+
+    The ``initial_response`` may only be consumed once (an HTTP response body
+    cannot be re-read).  Attempts after the first call ``make_request()`` for a
+    fresh response.
+
+    ``EMPTY_RESPONSE_ON_EXHAUSTED`` controls what happens when all
+    empty-response attempts are used up:
+
+    - ``"passthrough"`` (default): the final attempt delivers the degenerate
+      turn as-is; the request always succeeds.
+    - ``"error"``: raises :class:`fastapi.HTTPException` with a message
+      explaining the situation and suggesting a retry or model change.
+
     Args:
-        make_request: Function to create new HTTP request
-        client: HTTP client
-        model: Model name
-        model_cache: Model cache
-        auth_manager: Authentication manager
-        initial_response: Optional pre-validated response to use on first attempt.
-                         If provided, make_request is only called on retries.
-        max_retries: Maximum number of attempts
-        first_token_timeout: First token wait timeout (seconds)
-        request_messages: Original request messages (for fallback token counting)
-        request_tools: Original request tools (for fallback token counting)
+        make_request: Factory that opens a new streaming HTTP request.
+        client: HTTP client used by the internal generator.
+        model: Model name to include in response chunks.
+        model_cache: Model cache for token-limit lookups.
+        auth_manager: Authentication manager.
+        initial_response: Optional pre-validated 200 response for the first
+            attempt.  Consumed exactly once; later attempts call
+            ``make_request()``.
+        max_retries: Maximum first-token-timeout attempts per empty-response
+            attempt.
+        first_token_timeout: Seconds to wait for the first token.
+        request_messages: Original messages for fallback token counting.
+        request_tools: Original tools for fallback token counting.
         usage_sink: Optional mutable dict filled with final token counts.
-            On retry the sink is fully overwritten, so it reflects only the
-            attempt that actually produced a response.
-    
+            On retry the sink is fully overwritten so it reflects only the
+            attempt that produced the delivered response.
+
     Yields:
-        Strings in SSE format
-    
+        Strings in SSE format.  In ``as_reasoning_content`` mode, thinking
+        deltas may include ``reasoning_signature`` when Kiro provides one.
+
     Raises:
-        HTTPException: After exhausting all attempts
-    
+        HTTPException: After exhausting first-token-timeout retries, or when
+            ``EMPTY_RESPONSE_ON_EXHAUSTED`` is ``"error"`` and all
+            empty-response attempts are used up.
+
     Example:
         >>> async def make_req():
         ...     return await http_client.request_with_retry("POST", url, payload, stream=True)
@@ -630,45 +714,125 @@ async def stream_with_first_token_retry(
         ... ):
         ...     print(chunk)
     """
+    from kiro.config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_ON_EXHAUSTED
+    from kiro.empty_response import EmptyResponseError
+    from kiro.streaming_core import stream_with_empty_response_retry
+
+    # EMPTY_RESPONSE_RETRIES=0 means "feature off": single attempt, no detection.
+    # Otherwise the outer wrapper runs EMPTY_RESPONSE_RETRIES+1 total attempts.
+    empty_max_attempts: int = 1 if EMPTY_RESPONSE_RETRIES == 0 else EMPTY_RESPONSE_RETRIES + 1
+    on_error_mode: bool = EMPTY_RESPONSE_ON_EXHAUSTED == "error"
+
     def create_http_error(status_code: int, error_text: str) -> HTTPException:
         """Create HTTPException for HTTP errors."""
         return HTTPException(
             status_code=status_code,
-            detail=f"Upstream API error: {error_text}"
+            detail=f"Upstream API error: {error_text}",
         )
-    
+
     def create_timeout_error(retries: int, timeout: float) -> HTTPException:
         """Create HTTPException for timeout errors."""
         return HTTPException(
             status_code=504,
-            detail=f"Model did not respond within {timeout}s after {retries} attempts. Please try again."
+            detail=f"Model did not respond within {timeout}s after {retries} attempts. Please try again.",
         )
-    
-    async def stream_processor(response: httpx.Response) -> AsyncGenerator[str, None]:
-        """Process response and yield OpenAI SSE chunks."""
-        async for chunk in stream_kiro_to_openai_internal(
-            client,
-            response,
-            model,
-            model_cache,
-            auth_manager,
+
+    # Track how many times the outer runner has been called so we only pass
+    # initial_response on the very first call.  An HTTP response body cannot be
+    # re-read, so later calls must open a fresh connection via make_request().
+    _call_count: Dict[str, int] = {"n": 0}
+
+    async def attempt_runner(
+        empty_attempt: int,
+        is_final_attempt: bool,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Run one empty-response attempt with its own first-token-timeout budget.
+
+        ``empty_detection_enabled`` is True unless this is the final attempt in
+        passthrough mode, in which case the degenerate turn must be delivered
+        rather than raising.  In error mode detection stays on for the final
+        attempt so the EmptyResponseError propagates and can be converted to an
+        HTTPException by the caller.
+
+        Args:
+            empty_attempt: One-based attempt number from the outer wrapper.
+            is_final_attempt: True when this is the last allowed attempt.
+
+        Yields:
+            SSE strings.
+
+        Raises:
+            EmptyResponseError: When detection is enabled and the turn is empty.
+            HTTPException: On transport/timeout failure.
+        """
+        _call_count["n"] += 1
+        # Pass initial_response only on the very first call.
+        resp_for_attempt: Optional[httpx.Response] = (
+            initial_response if _call_count["n"] == 1 else None
+        )
+
+        # For passthrough mode, disarm detection on the final attempt so the
+        # degenerate turn is delivered rather than failing the request.
+        # For error mode, keep detection on all attempts so EmptyResponseError
+        # propagates out of stream_with_empty_response_retry.
+        detection_enabled: bool = not is_final_attempt or on_error_mode
+
+        async def stream_processor(resp: httpx.Response) -> AsyncGenerator[str, None]:
+            """Adapt a raw HTTP response into SSE strings."""
+            async for chunk in stream_kiro_to_openai_internal(
+                client,
+                resp,
+                model,
+                model_cache,
+                auth_manager,
+                first_token_timeout=first_token_timeout,
+                request_messages=request_messages,
+                request_tools=request_tools,
+                usage_sink=usage_sink,
+                empty_detection_enabled=detection_enabled,
+            ):
+                yield chunk
+
+        async for chunk in stream_with_first_token_retry_core(
+            make_request=make_request,
+            stream_processor=stream_processor,
+            initial_response=resp_for_attempt,
+            max_retries=max_retries,
             first_token_timeout=first_token_timeout,
-            request_messages=request_messages,
-            request_tools=request_tools,
-            usage_sink=usage_sink
+            on_http_error=create_http_error,
+            on_all_retries_failed=create_timeout_error,
         ):
             yield chunk
-    
-    async for chunk in stream_with_first_token_retry_core(
-        make_request=make_request,
-        stream_processor=stream_processor,
-        initial_response=initial_response,
-        max_retries=max_retries,
-        first_token_timeout=first_token_timeout,
-        on_http_error=create_http_error,
-        on_all_retries_failed=create_timeout_error,
-    ):
-        yield chunk
+
+    if empty_max_attempts <= 1:
+        # Feature is disabled: single attempt with detection always off.
+        async for chunk in attempt_runner(1, True):
+            yield chunk
+        return
+
+    try:
+        async for chunk in stream_with_empty_response_retry(
+            attempt_runner=attempt_runner,
+            max_attempts=empty_max_attempts,
+        ):
+            yield chunk
+    except EmptyResponseError as exc:
+        # Only reachable in error mode (detection stays on for the final attempt).
+        logger.error(
+            "Empty response budget exhausted "
+            f"(reason={exc.reason!r}, model={exc.model!r}, "
+            f"attempts={empty_max_attempts}); returning error to client."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The model returned no visible content after {empty_max_attempts} attempt(s) "
+                f"(reason: {exc.reason}). "
+                "Please retry your request or try a different model."
+            ),
+        )
+
 
 
 async def collect_stream_response(
@@ -696,10 +860,13 @@ async def collect_stream_response(
         request_tools: Original request tools (for fallback token counting)
     
     Returns:
-        Dictionary with full response in OpenAI chat.completion format
+        Dictionary with full response in OpenAI chat.completion format. A
+        non-empty ``reasoning_signature`` is included on the assistant message
+        when signed reasoning was present in the stream.
     """
     full_content = ""
     full_reasoning_content = ""
+    last_reasoning_signature: Optional[str] = None
     final_usage = None
     tool_calls = []
     finish_reason = "stop"  # Default fallback
@@ -730,6 +897,11 @@ async def collect_stream_response(
                 full_content += delta["content"]
             if "reasoning_content" in delta:
                 full_reasoning_content += delta["reasoning_content"]
+            reasoning_signature = delta.get("reasoning_signature")
+            if reasoning_signature:
+                if last_reasoning_signature is None:
+                    logger.debug("Captured reasoning signature while collecting stream")
+                last_reasoning_signature = reasoning_signature
             if "tool_calls" in delta:
                 tool_calls.extend(delta["tool_calls"])
             
@@ -749,6 +921,8 @@ async def collect_stream_response(
     message = {"role": "assistant", "content": full_content}
     if full_reasoning_content:
         message["reasoning_content"] = full_reasoning_content
+    if last_reasoning_signature:
+        message["reasoning_signature"] = last_reasoning_signature
     if tool_calls:
         # For non-streaming response remove index field from tool_calls,
         # as it's only required for streaming chunks

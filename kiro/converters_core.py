@@ -670,6 +670,45 @@ def sanitize_json_schema(schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 
+def flatten_top_level_combinators(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    攤平 tool input_schema「頂層」的 anyOf / allOf / oneOf。
+
+    Kiro 上游（Anthropic / Bedrock 相容端點）會回 400：
+    "input_schema does not support oneOf, allOf, or anyOf at the top level"。
+    OpenAI 端點無此限制，所以只有 Opus / Claude 這類走 Anthropic 路徑的模型會踩到。
+
+    策略：合併各 combinator 分支中的 object schema（type=object 或帶 properties），
+    以第一個出現的 key 為準，最後強制頂層為 object。若沒有任何 object 分支，
+    退回最小可用的 {"type": "object", "properties": {}}。
+
+    ponytail: 只處理頂層，巢狀的 anyOf 交給上游（Anthropic 允許巢狀 combinator）。
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    combinators = [k for k in ("anyOf", "allOf", "oneOf") if k in schema]
+    if not combinators:
+        return schema
+
+    result: Dict[str, Any] = {
+        k: v for k, v in schema.items() if k not in ("anyOf", "allOf", "oneOf")
+    }
+
+    for key in combinators:
+        branches = schema.get(key) or []
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            if branch.get("type") == "object" or "properties" in branch:
+                for bk, bv in branch.items():
+                    result.setdefault(bk, bv)
+
+    result["type"] = "object"
+    result.setdefault("properties", {})
+    return result
+
+
 # ==================================================================================================
 # Tool Processing
 # ==================================================================================================
@@ -800,6 +839,8 @@ def convert_tools_to_kiro_format(tools: Optional[List[UnifiedTool]]) -> List[Dic
     for tool in tools:
         # Sanitize parameters from fields that Kiro API doesn't accept
         sanitized_params = sanitize_json_schema(tool.input_schema)
+        # Anthropic/Bedrock 路徑不接受頂層 anyOf/allOf/oneOf，先攤平
+        sanitized_params = flatten_top_level_combinators(sanitized_params)
         
         # Kiro API requires non-empty description
         description = tool.description

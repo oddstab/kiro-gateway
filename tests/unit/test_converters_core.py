@@ -32,6 +32,7 @@ from kiro.converters_core import (
     extract_tool_results_from_content,
     extract_tool_uses_from_message,
     sanitize_json_schema,
+    flatten_top_level_combinators,
     convert_tools_to_kiro_format,
     convert_tool_results_to_kiro_format,
     tool_calls_to_text,
@@ -6475,3 +6476,42 @@ class TestBuildKiroPayloadWithThinkingConfig:
         print(f"Checking for <max_thinking_length>7000</max_thinking_length> in content...")
         assert "<max_thinking_length>7000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestFlattenTopLevelCombinators:
+    """頂層 anyOf/allOf/oneOf 攤平（修 Anthropic/Opus 路徑 400 錯誤）。"""
+
+    def test_no_combinator_is_unchanged(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        assert flatten_top_level_combinators(schema) == schema
+
+    def test_top_level_anyof_is_flattened(self):
+        # 模擬 tools.15：頂層帶 anyOf，Anthropic 會回 400
+        schema = {
+            "anyOf": [
+                {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+                {"type": "null"},
+            ]
+        }
+        result = flatten_top_level_combinators(schema)
+        assert "anyOf" not in result
+        assert result["type"] == "object"
+        assert result["properties"] == {"x": {"type": "string"}}
+        assert result["required"] == ["x"]
+
+    def test_allof_and_oneof_removed_even_without_object_branch(self):
+        schema = {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+        result = flatten_top_level_combinators(schema)
+        assert "oneOf" not in result
+        assert result == {"type": "object", "properties": {}}
+
+    def test_convert_tools_output_has_no_top_level_combinator(self):
+        tool = UnifiedTool(
+            name="t15",
+            description="d",
+            input_schema={"anyOf": [{"type": "object", "properties": {"p": {"type": "string"}}}]},
+        )
+        kiro_tools = convert_tools_to_kiro_format([tool])
+        json_schema = kiro_tools[0]["toolSpecification"]["inputSchema"]["json"]
+        assert not any(k in json_schema for k in ("anyOf", "allOf", "oneOf"))
+        assert json_schema["type"] == "object"

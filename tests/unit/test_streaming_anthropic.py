@@ -25,6 +25,7 @@ from kiro.streaming_anthropic import (
     stream_with_first_token_retry_anthropic,
 )
 from kiro.streaming_core import KiroEvent, StreamResult
+from kiro.empty_response import EmptyResponseError
 
 
 # ==================================================================================================
@@ -2231,3 +2232,890 @@ class TestAnthropicUsageSinkEdgeCases:
             f"the failed attempt's 400-char content"
         )
         print("✓ Sink holds only the final attempt")
+
+
+# ==================================================================================================
+# Tests for upstream stop reason routing (streaming + non-streaming)
+# ==================================================================================================
+
+class TestUpstreamStopReasonStreamingSuccess:
+    """Happy-path tests: upstream Kiro stopReason routes to correct Anthropic stop_reason."""
+
+    def _extract_stop_reason(self, events: list) -> str:
+        """Parse stop_reason from message_delta SSE events."""
+        for ev in events:
+            if "message_delta" in ev:
+                lines = ev.strip().split("\n")
+                for line in lines:
+                    if line.startswith("data: "):
+                        payload = json.loads(line[6:])
+                        if "delta" in payload and "stop_reason" in payload["delta"]:
+                            return payload["delta"]["stop_reason"]
+        return ""
+
+    @pytest.mark.asyncio
+    async def test_upstream_end_turn_yields_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream END_TURN maps to Anthropic end_turn.
+        Goal: Verify resolver is used for normal completion.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="stop_reason", stop_reason="END_TURN")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_upstream_tool_use_yields_tool_use(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream TOOL_USE maps to Anthropic tool_use.
+        Goal: Verify tool_use stop reason.
+        """
+        tool_data = {"id": "toolu_1", "function": {"name": "func", "arguments": "{}"}}
+
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="tool_use", tool_use=tool_data)
+            yield KiroEvent(type="stop_reason", stop_reason="TOOL_USE")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_upstream_max_tokens_yields_max_tokens(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream MAX_TOKENS maps to Anthropic max_tokens even without local truncation.
+        Goal: Verify upstream MAX_TOKENS respected when stream completes normally.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="stop_reason", stop_reason="MAX_TOKENS")
+            # context_usage present → stream_completed_normally = True → no local truncation
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_upstream_stop_sequence_yields_stop_sequence(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream STOP_SEQUENCE maps to Anthropic stop_sequence.
+        Goal: Verify stop_sequence stop reason.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Done")
+            yield KiroEvent(type="stop_reason", stop_reason="STOP_SEQUENCE")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "stop_sequence"
+
+    @pytest.mark.asyncio
+    async def test_upstream_content_filtered_yields_refusal(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream CONTENT_FILTERED maps to Anthropic refusal.
+        Goal: Verify content-filter stop reason.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="")
+            yield KiroEvent(type="stop_reason", stop_reason="CONTENT_FILTERED")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "refusal"
+
+    @pytest.mark.asyncio
+    async def test_no_upstream_value_regression_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: No upstream stop_reason still produces end_turn via inference.
+        Goal: Regression guard — behavior must be identical to the old code path.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_no_upstream_value_regression_tool_use(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: No upstream stop_reason with tool calls produces tool_use via inference.
+        Goal: Regression guard for tool-call path.
+        """
+        tool_data = {"id": "toolu_1", "function": {"name": "func", "arguments": "{}"}}
+
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="tool_use", tool_use=tool_data)
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_local_truncation_overrides_upstream_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Local truncation (no context_usage) overrides upstream END_TURN → max_tokens.
+        Goal: Verify truncation has highest precedence.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="partial text")
+            yield KiroEvent(type="stop_reason", stop_reason="END_TURN")
+            # No context_usage → stream_completed_normally = False → truncation detected
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_tool_blocks_beat_upstream_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Tool blocks present + upstream END_TURN → still tool_use.
+        Goal: Verify tool_calls guard in resolver.
+        """
+        tool_data = {"id": "toolu_1", "function": {"name": "func", "arguments": "{}"}}
+
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="tool_use", tool_use=tool_data)
+            yield KiroEvent(type="stop_reason", stop_reason="END_TURN")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_usage_sink_finish_reason_matches_emitted(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: usage_sink["finish_reason"] equals the emitted stop_reason.
+        Goal: Verify sink consistency.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="stop_reason", stop_reason="MAX_TOKENS")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        sink: dict = {}
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                    usage_sink=sink,
+                ):
+                    events.append(ev)
+
+        emitted = self._extract_stop_reason(events)
+        assert sink["finish_reason"] == emitted == "max_tokens"
+
+
+class TestReasoningAwareTruncationStreaming:
+    """Tests for the reasoning-aware truncation fix in the streaming path."""
+
+    def _extract_stop_reason(self, events: list) -> str:
+        """Parse stop_reason from message_delta SSE events."""
+        for ev in events:
+            if "message_delta" in ev:
+                lines = ev.strip().split("\n")
+                for line in lines:
+                    if line.startswith("data: "):
+                        payload = json.loads(line[6:])
+                        if "delta" in payload and "stop_reason" in payload["delta"]:
+                            return payload["delta"]["stop_reason"]
+        return ""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_turn_without_completion_is_truncated(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Thinking-only output with no context_usage → detected as truncated.
+        Goal: Verify the old len(full_content) > 0 bug is fixed.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="reasoning here")
+            # No context_usage → stream_completed_normally = False
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_turn_with_completion_is_not_truncated(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Thinking-only output WITH context_usage → NOT truncated (no false positive).
+        Goal: Verify completion signal suppresses truncation.
+        """
+        async def mock_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="reasoning here")
+            yield KiroEvent(type="context_usage", context_usage_percentage=10.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_stream):
+            with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                async for ev in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    events.append(ev)
+
+        assert self._extract_stop_reason(events) == "end_turn"
+
+
+# ==================================================================================================
+# Tests for upstream stop reason routing (non-streaming path)
+# ==================================================================================================
+
+class TestUpstreamStopReasonNonStreamingSuccess:
+    """Happy-path tests: upstream Kiro stopReason routes to correct Anthropic stop_reason (non-streaming)."""
+
+    @pytest.mark.asyncio
+    async def test_upstream_end_turn_yields_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream END_TURN maps to end_turn in non-streaming response.
+        Goal: Verify resolver is used for normal completion.
+        """
+        mock_result = StreamResult(
+            content="Hello",
+            thinking_content="",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=5.0,
+            stop_reason="END_TURN",
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_upstream_tool_use_yields_tool_use(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream TOOL_USE maps to tool_use in non-streaming response.
+        Goal: Verify tool_use stop reason.
+        """
+        mock_result = StreamResult(
+            content="",
+            thinking_content="",
+            tool_calls=[{"id": "t1", "function": {"name": "f", "arguments": "{}"}}],
+            usage=None,
+            context_usage_percentage=5.0,
+            stop_reason="TOOL_USE",
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_upstream_max_tokens_yields_max_tokens(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Upstream MAX_TOKENS maps to max_tokens even without local truncation.
+        Goal: Verify upstream MAX_TOKENS respected in non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="Hello",
+            thinking_content="",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=5.0,
+            stop_reason="MAX_TOKENS",
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_no_upstream_value_regression_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: No upstream stop_reason still produces end_turn via inference.
+        Goal: Regression guard for non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="Hello",
+            thinking_content="",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=5.0,
+            stop_reason=None,
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_no_upstream_value_regression_tool_use(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: No upstream stop_reason with tool calls → tool_use via inference.
+        Goal: Regression guard for non-streaming tool-call path.
+        """
+        mock_result = StreamResult(
+            content="",
+            thinking_content="",
+            tool_calls=[{"id": "t1", "function": {"name": "f", "arguments": "{}"}}],
+            usage=None,
+            context_usage_percentage=None,
+            stop_reason=None,
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "tool_use"
+
+    @pytest.mark.asyncio
+    async def test_local_truncation_overrides_upstream_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Local truncation overrides upstream END_TURN → max_tokens.
+        Goal: Verify truncation has highest precedence in non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="partial text",
+            thinking_content="",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=None,  # No completion signal → truncated
+            stop_reason="END_TURN",
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_tool_blocks_beat_upstream_end_turn(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Tool calls + upstream END_TURN → still tool_use.
+        Goal: Verify tool_calls guard in non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="",
+            thinking_content="",
+            tool_calls=[{"id": "t1", "function": {"name": "f", "arguments": "{}"}}],
+            usage=None,
+            context_usage_percentage=5.0,
+            stop_reason="END_TURN",
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "tool_use"
+
+
+class TestReasoningAwareTruncationNonStreaming:
+    """Tests for the reasoning-aware truncation fix in the non-streaming path."""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_turn_without_completion_is_truncated(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Thinking-only content with no context_usage → detected as truncated.
+        Goal: Verify the old len(result.content) > 0 bug is fixed in non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="",
+            thinking_content="some reasoning",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=None,
+            stop_reason=None,
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_turn_with_completion_is_not_truncated(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Thinking-only content WITH context_usage → NOT truncated (no false positive).
+        Goal: Verify completion signal suppresses truncation in non-streaming path.
+        """
+        mock_result = StreamResult(
+            content="",
+            thinking_content="some reasoning",
+            tool_calls=[],
+            usage=None,
+            context_usage_percentage=10.0,
+            stop_reason=None,
+        )
+        with patch("kiro.streaming_anthropic.collect_stream_to_result", return_value=mock_result):
+            result = await collect_anthropic_response(
+                mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+            )
+        assert result["stop_reason"] == "end_turn"
+
+
+# ==================================================================================================
+# Tests for empty-response recovery
+# ==================================================================================================
+
+class TestAnthropicEmptyResponseDetection:
+    """Tests empty-response classification before Anthropic terminal events."""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_enabled_raises_before_terminal_events(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Raises a retryable signal for a completed reasoning-only turn.
+        Goal: Ensure terminal events and usage cannot be committed for a discarded attempt.
+        """
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="private reasoning")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        sink = {"stale": "value"}
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+            with pytest.raises(EmptyResponseError) as error_info:
+                async for event in stream_kiro_to_anthropic(
+                    mock_response,
+                    "claude-sonnet-4.5",
+                    mock_model_cache,
+                    mock_auth_manager,
+                    usage_sink=sink,
+                    empty_detection_enabled=True,
+                ):
+                    events.append(event)
+
+        assert error_info.value.reason == "reasoning_only"
+        assert error_info.value.had_reasoning is True
+        assert not any("message_delta" in event for event in events)
+        assert not any("message_stop" in event for event in events)
+        assert sink == {}
+
+    @pytest.mark.asyncio
+    async def test_reasoning_only_disabled_delivers_normally(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Preserves normal stream delivery when detection is disabled.
+        Goal: Ensure direct callers retain pre-feature behavior.
+        """
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="private reasoning")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+            async for event in stream_kiro_to_anthropic(
+                mock_response,
+                "claude-sonnet-4.5",
+                mock_model_cache,
+                mock_auth_manager,
+                empty_detection_enabled=False,
+            ):
+                events.append(event)
+
+        assert any("message_delta" in event for event in events)
+        assert any("message_stop" in event for event in events)
+
+    @pytest.mark.asyncio
+    async def test_visible_content_or_tool_blocks_never_raise(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Delivers visible content and tool blocks with detection enabled.
+        Goal: Ensure usable model output is never resampled.
+        """
+        async def content_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="visible answer")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        tool = {
+            "id": "toolu_1",
+            "function": {"name": "get_weather", "arguments": "{}"},
+        }
+
+        async def tool_stream(*args, **kwargs):
+            yield KiroEvent(type="tool_use", tool_use=tool)
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        for stream in (content_stream, tool_stream):
+            events = []
+            with patch("kiro.streaming_anthropic.parse_kiro_stream", stream):
+                with patch("kiro.streaming_anthropic.parse_bracket_tool_calls", return_value=[]):
+                    async for event in stream_kiro_to_anthropic(
+                        mock_response,
+                        "claude-sonnet-4.5",
+                        mock_model_cache,
+                        mock_auth_manager,
+                        empty_detection_enabled=True,
+                    ):
+                        events.append(event)
+            assert any("message_stop" in event for event in events)
+
+    @pytest.mark.asyncio
+    async def test_truncated_and_max_tokens_turns_never_raise(
+        self, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Delivers truncation and upstream max-token outcomes unchanged.
+        Goal: Prevent retries of outcomes clients can interpret directly.
+        """
+        async def truncated_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="partial reasoning")
+
+        async def max_tokens_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="complete reasoning")
+            yield KiroEvent(type="stop_reason", stop_reason="MAX_TOKENS")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        for stream in (truncated_stream, max_tokens_stream):
+            events = []
+            with patch("kiro.streaming_anthropic.parse_kiro_stream", stream):
+                async for event in stream_kiro_to_anthropic(
+                    mock_response,
+                    "claude-sonnet-4.5",
+                    mock_model_cache,
+                    mock_auth_manager,
+                    empty_detection_enabled=True,
+                ):
+                    events.append(event)
+            assert any("message_stop" in event for event in events)
+
+
+class TestAnthropicEmptyResponseRetry:
+    """Tests empty-response retry wrapping around first-token retries."""
+
+    @pytest.mark.asyncio
+    async def test_empty_first_attempt_then_content_yields_one_coherent_stream(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Resamples an empty first completion and delivers the next answer.
+        Goal: Verify only the successful attempt reaches the client terminal event.
+        """
+        first = AsyncMock()
+        first.status_code = 200
+        first.aclose = AsyncMock()
+        second = AsyncMock()
+        second.status_code = 200
+        second.aclose = AsyncMock()
+        requests = []
+
+        async def make_request():
+            requests.append("retry")
+            return second
+
+        attempts = {"count": 0}
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                yield KiroEvent(type="thinking", thinking_content="empty thought")
+                yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+                return
+            yield KiroEvent(type="content", content="visible answer")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        chunks = []
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 1):
+            with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_ON_EXHAUSTED", "passthrough"):
+                with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+                    async for chunk in stream_with_first_token_retry_anthropic(
+                        make_request=make_request,
+                        model="claude-sonnet-4.5",
+                        model_cache=mock_model_cache,
+                        auth_manager=mock_auth_manager,
+                        initial_response=first,
+                    ):
+                        chunks.append(chunk)
+
+        assert attempts["count"] == 2
+        assert requests == ["retry"]
+        assert sum("message_stop" in chunk for chunk in chunks) == 1
+        assert sum("message_delta" in chunk for chunk in chunks) == 1
+        assert any("visible answer" in chunk for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_passthrough_delivers_degenerate_turn(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Delivers the final degenerate turn under passthrough policy.
+        Goal: Preserve the configured non-error exhausted behavior.
+        """
+        first = AsyncMock()
+        first.status_code = 200
+        first.aclose = AsyncMock()
+        second = AsyncMock()
+        second.status_code = 200
+        second.aclose = AsyncMock()
+        calls = 0
+
+        async def make_request():
+            nonlocal calls
+            calls += 1
+            return second
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="still empty")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        chunks = []
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 1):
+            with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_ON_EXHAUSTED", "passthrough"):
+                with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+                    async for chunk in stream_with_first_token_retry_anthropic(
+                        make_request=make_request,
+                        model="claude-sonnet-4.5",
+                        model_cache=mock_model_cache,
+                        auth_manager=mock_auth_manager,
+                        initial_response=first,
+                    ):
+                        chunks.append(chunk)
+
+        assert calls == 1
+        assert sum("message_stop" in chunk for chunk in chunks) == 1
+        assert any("message_delta" in chunk for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_zero_retries_uses_one_attempt_without_detection(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Disables empty detection when the retry count is zero.
+        Goal: Preserve byte-for-byte single-attempt behavior.
+        """
+        response = AsyncMock()
+        response.status_code = 200
+        response.aclose = AsyncMock()
+        calls = 0
+
+        async def make_request():
+            nonlocal calls
+            calls += 1
+            return response
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="only reasoning")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        chunks = []
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 0):
+            with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+                async for chunk in stream_with_first_token_retry_anthropic(
+                    make_request=make_request,
+                    model="claude-sonnet-4.5",
+                    model_cache=mock_model_cache,
+                    auth_manager=mock_auth_manager,
+                    initial_response=response,
+                ):
+                    chunks.append(chunk)
+
+        assert calls == 0
+        assert sum("message_stop" in chunk for chunk in chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_retried_attempts_request_fresh_response(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Uses initial_response once and requests a fresh body for resampling.
+        Goal: Prevent attempts from reusing an already consumed HTTP stream.
+        """
+        initial = AsyncMock()
+        initial.status_code = 200
+        initial.aclose = AsyncMock()
+        fresh = AsyncMock()
+        fresh.status_code = 200
+        fresh.aclose = AsyncMock()
+        received_responses = []
+        calls = 0
+
+        async def make_request():
+            nonlocal calls
+            calls += 1
+            return fresh
+
+        async def mock_stream(response, *args, **kwargs):
+            received_responses.append(response)
+            if response is initial:
+                yield "event: message_start\ndata: {}\n\n"
+                raise EmptyResponseError("reasoning_only")
+            yield "event: message_start\ndata: {}\n\n"
+            yield "event: message_stop\ndata: {}\n\n"
+
+        chunks = []
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 1):
+            with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_ON_EXHAUSTED", "passthrough"):
+                with patch("kiro.streaming_anthropic.stream_kiro_to_anthropic", mock_stream):
+                    async for chunk in stream_with_first_token_retry_anthropic(
+                        make_request=make_request,
+                        model="claude-sonnet-4.5",
+                        model_cache=mock_model_cache,
+                        auth_manager=mock_auth_manager,
+                        initial_response=initial,
+                    ):
+                        chunks.append(chunk)
+
+        assert received_responses == [initial, fresh]
+        assert calls == 1
+        assert sum("message_stop" in chunk for chunk in chunks) == 1
+
+    @pytest.mark.asyncio
+    async def test_exhausted_error_policy_raises_before_terminal_events(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Turns a final empty response into an actionable gateway error.
+        Goal: Let the route convert the exception into an Anthropic error SSE event.
+        """
+        first = AsyncMock()
+        first.status_code = 200
+        first.aclose = AsyncMock()
+        second = AsyncMock()
+        second.status_code = 200
+        second.aclose = AsyncMock()
+        calls = 0
+
+        async def make_request():
+            nonlocal calls
+            calls += 1
+            return second
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="still empty")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        events = []
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 1):
+            with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_ON_EXHAUSTED", "error"):
+                with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+                    with pytest.raises(Exception) as error_info:
+                        async for event in stream_with_first_token_retry_anthropic(
+                            make_request=make_request,
+                            model="claude-sonnet-4.5",
+                            model_cache=mock_model_cache,
+                            auth_manager=mock_auth_manager,
+                            initial_response=first,
+                        ):
+                            events.append(event)
+
+        assert calls == 1
+        assert "without visible content or tool use" in str(error_info.value)
+        assert not any("message_delta" in event for event in events)
+        assert not any("message_stop" in event for event in events)
+
+    @pytest.mark.asyncio
+    async def test_discarded_attempt_clears_existing_usage_sink(
+        self, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Clears previously recorded usage when an attempt is discarded.
+        Goal: Ensure an empty resample cannot leave stale usage data for the route.
+        """
+        first = AsyncMock()
+        first.status_code = 200
+        first.aclose = AsyncMock()
+        second = AsyncMock()
+        second.status_code = 200
+        second.aclose = AsyncMock()
+
+        async def make_request():
+            return second
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="thinking", thinking_content="still empty")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        sink = {"completion_tokens": 999, "stale": "discarded"}
+        with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_RETRIES", 1):
+            with patch("kiro.streaming_anthropic.EMPTY_RESPONSE_ON_EXHAUSTED", "error"):
+                with patch("kiro.streaming_anthropic.parse_kiro_stream", mock_parse_kiro_stream):
+                    with pytest.raises(Exception):
+                        async for _ in stream_with_first_token_retry_anthropic(
+                            make_request=make_request,
+                            model="claude-sonnet-4.5",
+                            model_cache=mock_model_cache,
+                            auth_manager=mock_auth_manager,
+                            initial_response=first,
+                            usage_sink=sink,
+                        ):
+                            pass
+
+        assert sink == {}

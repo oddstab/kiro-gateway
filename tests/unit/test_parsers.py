@@ -1405,3 +1405,216 @@ class TestNativeReasoningEvents:
             "type": "reasoning",
             "data": {"text": "先檢查", "signature": None},
         }]
+
+class TestStopReasonEvent:
+    """Tests for stop_reason event parsing from metadataEvent."""
+
+    def test_parses_stop_reason_end_turn(self):
+        """
+        What it does: Parses metadataEvent with stopReason END_TURN.
+        Goal: Ensure stopReason field is extracted correctly.
+        """
+        print("Setup: Stop reason event (END_TURN)...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":"END_TURN"}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == "END_TURN"
+
+    def test_parses_stop_reason_tool_use(self):
+        """
+        What it does: Parses metadataEvent with stopReason TOOL_USE.
+        Goal: Ensure TOOL_USE reason is recognized.
+        """
+        print("Setup: Stop reason event (TOOL_USE)...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":"TOOL_USE"}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == "TOOL_USE"
+
+    def test_parses_stop_reason_max_tokens(self):
+        """
+        What it does: Parses metadataEvent with stopReason MAX_TOKENS.
+        Goal: Ensure MAX_TOKENS reason is recognized.
+        """
+        print("Setup: Stop reason event (MAX_TOKENS)...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":"MAX_TOKENS"}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == "MAX_TOKENS"
+
+    def test_parses_stop_reason_all_known_values(self):
+        """
+        What it does: Parses all known Kiro stop reason values.
+        Goal: Ensure all documented stop reasons are parseable.
+        """
+        print("Setup: All known stop reason values...")
+        known_reasons = [
+            "END_TURN",
+            "TOOL_USE",
+            "MAX_TOKENS",
+            "STOP_SEQUENCE",
+            "CONTENT_FILTERED",
+            "GUARDRAIL_INTERVENED",
+        ]
+
+        print("Action: Parsing each reason...")
+        for reason in known_reasons:
+            parser = AwsEventStreamParser()
+            chunk = f'{{"stopReason":"{reason}"}}'.encode()
+
+            print(f"  Parsing {reason}...")
+            events = parser.feed(chunk)
+
+            assert len(events) == 1
+            assert events[0]["type"] == "stop_reason"
+            assert events[0]["data"] == reason
+
+        print("✓ All known reasons parsed successfully")
+
+    def test_stop_reason_split_across_chunks(self):
+        """
+        What it does: Handles stop_reason JSON split across two chunks.
+        Goal: Ensure fragmented JSON is handled correctly.
+        """
+        print("Setup: Stop reason JSON split across chunks...")
+        parser = AwsEventStreamParser()
+        chunk1 = b'{"stopReason":'
+        chunk2 = b'"MAX_TOKENS"}'
+
+        print("Action: First chunk...")
+        events1 = parser.feed(chunk1)
+        print(f"  Got {len(events1)} events")
+        assert len(events1) == 0
+
+        print("Action: Second chunk...")
+        events2 = parser.feed(chunk2)
+        print(f"  Got {len(events2)} events")
+        assert len(events2) == 1
+        assert events2[0]["type"] == "stop_reason"
+        assert events2[0]["data"] == "MAX_TOKENS"
+
+    def test_stop_reason_with_trailing_garbage(self):
+        """
+        What it does: Parses stop_reason with garbage after JSON.
+        Goal: Ensure trailing data doesn't interfere.
+        """
+        print("Setup: Stop reason with trailing garbage...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":"END_TURN"}garbage'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == "END_TURN"
+
+    def test_stop_reason_with_trailing_garbage(self):
+        """
+        What it does: Parses stop_reason with garbage after JSON.
+        Goal: Ensure trailing data doesn't interfere.
+        """
+        print("Setup: Stop reason with trailing garbage...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":"END_TURN"}garbage'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == "END_TURN"
+
+    def test_stop_reason_in_middle_of_content(self):
+        """
+        What it does: Parses stop_reason when embedded in a stream with other events.
+        Goal: Ensure stop_reason is correctly identified among other events.
+        """
+        print("Setup: Mixed events with stop_reason...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"content":"Hello"}{"stopReason":"END_TURN"}{"usage":1.5}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 3 events, Got {len(events)}")
+        assert len(events) == 3
+        assert events[0]["type"] == "content"
+        assert events[0]["data"] == "Hello"
+        assert events[1]["type"] == "stop_reason"
+        assert events[1]["data"] == "END_TURN"
+        assert events[2]["type"] == "usage"
+        assert events[2]["data"] == 1.5
+
+    def test_stop_reason_empty_string(self):
+        """
+        What it does: Parses stop_reason with empty string value.
+        Goal: Ensure empty stopReason is handled gracefully.
+        """
+        print("Setup: Stop reason with empty string...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"stopReason":""}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event, Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "stop_reason"
+        assert events[0]["data"] == ""
+
+    def test_stop_reason_missing_field_defaults_to_empty(self):
+        """
+        What it does: Tests behavior when stopReason field is missing.
+        Goal: Ensure .get() with default handles missing field.
+        """
+        print("Setup: Object with no stopReason field...")
+        parser = AwsEventStreamParser()
+        chunk = b'{"someOtherField":"value"}'
+
+        print("Action: Feeding chunk...")
+        # This should not match the stop_reason pattern, so 0 events
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 0 events, Got {len(events)}")
+        assert len(events) == 0
+
+    def test_stop_reason_json_embedded_in_string_not_parsed(self):
+        """
+        What it does: Ensures stopReason pattern search respects JSON structure.
+        Goal: Verify that JSON parsing handles nested structures correctly.
+        """
+        print("Setup: Testing pattern matching with nested JSON...")
+        parser = AwsEventStreamParser()
+        # This is a valid content event with embedded stop_reason-like string
+        # Use proper escaping for the nested JSON
+        chunk = b'{"content":"Here is data: {\\"stopReason\\":\\"MAX_TOKENS\\"}"}'
+
+        print("Action: Feeding chunk...")
+        events = parser.feed(chunk)
+
+        print(f"Comparing result: Expected 1 event (content), Got {len(events)}")
+        assert len(events) == 1
+        assert events[0]["type"] == "content"
+        # Verify the content includes the escaped JSON string
+        assert "stopReason" in events[0]["data"]

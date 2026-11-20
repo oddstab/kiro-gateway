@@ -224,6 +224,17 @@ def _sync_readonly_copy_sync() -> None:
     copy without error.  We therefore keep the live DB in WAL mode (good for
     the host-side writer) and produce a fresh DELETE-mode snapshot for
     the container-side reader on every sync interval.
+
+    sqlite3's backup() reads the destination header before copying, so a
+    snapshot left truncated by an earlier crash or partial write makes every
+    later sync fail with "database disk image is malformed" indefinitely.  On
+    that error the destination is emptied and the backup retried once, so the
+    sync recovers on its own instead of needing the file removed by hand.
+
+    Recovery truncates the file rather than deleting or renaming it, because
+    Grafana keeps the snapshot open and Windows refuses to unlink or rename a
+    file that another process holds open.  A zero-length file is a valid empty
+    SQLite database, so backup() accepts it.
     """
     db = _db_path()
     dst_path = db.parent / "usage-readonly.db"
@@ -231,18 +242,47 @@ def _sync_readonly_copy_sync() -> None:
         with _lock:
             if _conn is None:
                 return
-            dst = sqlite3.connect(str(dst_path))
             try:
-                _conn.backup(dst)
-                dst.execute("PRAGMA journal_mode=DELETE")
-                dst.commit()
-            finally:
-                dst.close()
+                _backup_to(dst_path)
+            except sqlite3.OperationalError:
+                # Transient (locked, busy, cannot open): the file itself may be
+                # fine, so keep the last good snapshot and let the next sync try.
+                raise
+            except sqlite3.DatabaseError as e:
+                # SQLITE_CORRUPT / SQLITE_NOTADB surface as plain DatabaseError.
+                logger.warning(
+                    "[UsageDB] Readonly copy at {} is unusable ({}), rebuilding it",
+                    dst_path,
+                    e,
+                )
+                with open(dst_path, "wb"):
+                    pass  # opening for write truncates to zero length
+                _backup_to(dst_path)
         logger.debug("[UsageDB] Readonly copy synced to {}", dst_path)
     except sqlite3.Error as e:
         logger.error("[UsageDB] Failed to sync readonly copy: {}", e)
     except OSError as e:
         logger.error("[UsageDB] Filesystem error syncing readonly copy to {}: {}", dst_path, e)
+
+
+def _backup_to(dst_path: Path) -> None:
+    """Back up the live connection into dst_path using DELETE journal mode.
+
+    Must be called while holding _lock with _conn already open.
+
+    Args:
+        dst_path: Destination database file; created if it does not exist.
+
+    Raises:
+        sqlite3.Error: If the destination cannot be opened or written.
+    """
+    dst = sqlite3.connect(str(dst_path))
+    try:
+        _conn.backup(dst)  # type: ignore[union-attr]  # caller guarantees _conn is open
+        dst.execute("PRAGMA journal_mode=DELETE")
+        dst.commit()
+    finally:
+        dst.close()
 
 
 # --------------------------------------------------------------------------------------------------

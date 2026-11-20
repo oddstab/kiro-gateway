@@ -69,7 +69,7 @@ class KiroEvent:
     This format is API-agnostic and can be converted to both OpenAI and Anthropic formats.
 
     Attributes:
-        type: Event type (content, thinking, tool_use, web_search, usage, context_usage, error)
+        type: Event type (content, thinking, tool_use, web_search, usage, context_usage, stop_reason, error)
         content: Text content (for content events)
         thinking_content: Thinking/reasoning content (for thinking events)
         reasoning_signature: Optional native Kiro reasoning signature
@@ -77,6 +77,7 @@ class KiroEvent:
         web_search: Web search results data (for web_search events)
         usage: Usage/metering data (for usage events)
         context_usage_percentage: Context usage percentage (for context_usage events)
+        stop_reason: Upstream Kiro stop reason (for stop_reason events)
         is_first_thinking_chunk: Whether this is the first thinking chunk
         is_last_thinking_chunk: Whether this is the last thinking chunk
     """
@@ -88,6 +89,7 @@ class KiroEvent:
     web_search: Optional[Dict[str, Any]] = None
     usage: Optional[Dict[str, Any]] = None
     context_usage_percentage: Optional[float] = None
+    stop_reason: Optional[str] = None
     is_first_thinking_chunk: bool = False
     is_last_thinking_chunk: bool = False
 
@@ -105,6 +107,7 @@ class StreamResult:
         web_searches: List of web search results from <web_search> tags
         usage: Usage information
         context_usage_percentage: Context usage percentage from Kiro API
+        stop_reason: Upstream Kiro stop reason from metadataEvent
     """
     content: str = ""
     thinking_content: str = ""
@@ -113,6 +116,7 @@ class StreamResult:
     web_searches: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
     context_usage_percentage: Optional[float] = None
+    stop_reason: Optional[str] = None
 
 
 class FirstTokenTimeoutError(Exception):
@@ -355,6 +359,9 @@ async def _process_chunk(
                 reasoning_signature=reasoning_data.get("signature"),
             )
 
+        elif event["type"] == "stop_reason":
+            yield KiroEvent(type="stop_reason", stop_reason=event["data"])
+
         elif event["type"] == "usage":
             yield KiroEvent(type="usage", usage=event["data"])
 
@@ -404,6 +411,9 @@ async def collect_stream_to_result(
             result.usage = event.usage
         elif event.type == "context_usage" and event.context_usage_percentage is not None:
             result.context_usage_percentage = event.context_usage_percentage
+        elif event.type == "stop_reason" and event.stop_reason:
+            # Last non-empty stop_reason wins
+            result.stop_reason = event.stop_reason
     
     # Check for bracket-style tool calls in full content
     bracket_tool_calls = parse_bracket_tool_calls(full_content_for_bracket_tools)
@@ -485,6 +495,85 @@ def normalize_token_source(source: Optional[str]) -> str:
 # ==================================================================================================
 # First Token Retry Logic
 # ==================================================================================================
+
+async def stream_with_empty_response_retry(
+    attempt_runner: Callable[[int, bool], AsyncGenerator[str, None]],
+    max_attempts: int,
+) -> AsyncGenerator[str, None]:
+    """
+    Run streaming attempts until one produces a client-visible result.
+
+    Kiro occasionally completes a turn having emitted reasoning tokens only:
+    no text, no tool calls, and a stop reason that claims a normal finish.
+    Clients cannot distinguish that from a real answer, so they either show an
+    empty reply or resample it themselves many times. Resampling once here is
+    both cheaper and better informed, because the gateway already knows why the
+    turn was empty.
+
+    The retry budget is deliberately separate from the first-token-timeout
+    budget: an empty completion and a dead connection are different failures
+    and must not consume each other's allowance.
+
+    The final attempt is always run with detection disarmed, so a persistently
+    degenerate turn is delivered as-is rather than failing the request. That
+    keeps this wrapper strictly additive: with ``max_attempts <= 1`` it behaves
+    exactly like calling ``attempt_runner`` directly.
+
+    Args:
+        attempt_runner: Factory that starts one full attempt. Receives the
+            one-based attempt number and whether this is the final attempt,
+            and yields SSE strings. It must raise
+            :class:`kiro.empty_response.EmptyResponseError` for a degenerate
+            turn only when the final flag is False, and must not have emitted
+            any terminal SSE event before raising.
+        max_attempts: Total attempts allowed, including the first. Values below
+            2 disable retrying.
+
+    Yields:
+        SSE strings from the attempt that produced a usable result, or from the
+        final attempt when the budget is exhausted.
+
+    Raises:
+        Exception: Anything raised by ``attempt_runner`` other than
+            EmptyResponseError propagates untouched, so transport and HTTP
+            error handling keeps its existing behaviour.
+    """
+    # Imported here to keep the module-level import graph acyclic: the
+    # empty-response module depends on stop_reasons, not on streaming.
+    from kiro.empty_response import EmptyResponseError, log_empty_response
+
+    total_attempts = max(1, max_attempts)
+
+    for attempt in range(1, total_attempts + 1):
+        is_final_attempt = attempt >= total_attempts
+        try:
+            async for chunk in attempt_runner(attempt, is_final_attempt):
+                yield chunk
+            return
+        except EmptyResponseError as empty_error:
+            # Re-raise instead of looping once the budget is spent. Callers in
+            # passthrough mode disarm detection on the final attempt so this
+            # never fires; callers that deliberately keep detection armed (the
+            # "error" exhaustion mode) rely on it to surface the failure.
+            if is_final_attempt:
+                raise
+
+            log_empty_response(
+                reason=empty_error.reason,
+                had_reasoning=empty_error.had_reasoning,
+                content_len=empty_error.content_len,
+                tool_call_count=empty_error.tool_call_count,
+                kiro_stop_reason=empty_error.kiro_stop_reason,
+                completion_tokens=empty_error.completion_tokens,
+                model=empty_error.model,
+                attempt=attempt,
+                retry_budget=total_attempts - 1,
+            )
+            logger.warning(
+                f"Resampling after an empty response "
+                f"(attempt {attempt}/{total_attempts})"
+            )
+
 
 async def stream_with_first_token_retry(
     make_request: Callable[[], Awaitable[httpx.Response]],

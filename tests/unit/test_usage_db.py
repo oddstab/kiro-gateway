@@ -653,6 +653,107 @@ class TestReadonlyCopy:
         await udb.sync_readonly_copy()  # must not raise
         assert not (tmp_path / "usage-readonly.db").exists()
 
+    @pytest.mark.asyncio
+    async def test_sync_overwrites_corrupt_existing_copy(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """
+        What it does: Places a corrupt (truncated) usage-readonly.db, then syncs.
+        Purpose: A once-broken snapshot must not poison every later sync.
+                 sqlite3 backup() reads the destination header, so writing
+                 straight into the published file fails forever with
+                 "database disk image is malformed" until deleted by hand.
+        """
+        print("Setup: enable DB, write one row, produce a valid copy...")
+        _enable_db(monkeypatch, tmp_path)
+
+        import kiro.usage_db as udb
+
+        udb._record_usage_sync(_make_fields(model="corrupt-recovery"))
+        await udb.sync_readonly_copy()
+
+        dst = tmp_path / "usage-readonly.db"
+        good_bytes = dst.read_bytes()
+        assert len(good_bytes) > 4096
+
+        print("Setup: truncate the copy by one page to simulate a partial write...")
+        dst.write_bytes(good_bytes[:-4096])
+        with pytest.raises(sqlite3.DatabaseError):
+            with sqlite3.connect(f"file:{dst}?mode=ro", uri=True) as broken:
+                broken.execute("PRAGMA integrity_check").fetchall()
+                broken.execute("SELECT COUNT(*) FROM usage_log").fetchone()
+
+        print("Action: sync again over the corrupt file...")
+        await udb.sync_readonly_copy()
+
+        print("Assert: copy is readable again and holds the row...")
+        with sqlite3.connect(str(dst)) as fixed:
+            assert fixed.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert fixed.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0] == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_swallows_persistent_backup_failure(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """
+        What it does: Makes every backup attempt raise, including the retry.
+        Purpose: A snapshot that cannot be rebuilt must still not raise into
+                 the caller, since the sync loop runs beside live traffic.
+        """
+        print("Setup: enable DB and write one row...")
+        _enable_db(monkeypatch, tmp_path)
+
+        import kiro.usage_db as udb
+
+        udb._record_usage_sync(_make_fields(model="persistent-failure"))
+
+        calls: list[Path] = []
+
+        def _boom(dst_path: Path) -> None:
+            calls.append(dst_path)
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        monkeypatch.setattr(udb, "_backup_to", _boom)
+
+        print("Action: sync with a permanently failing backup...")
+        await udb.sync_readonly_copy()  # must not raise
+
+        print("Assert: it tried once, then retried once after the rebuild...")
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_does_not_delete_copy_on_non_database_error(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """
+        What it does: Fails the backup with an OperationalError (locked, not corrupt).
+        Purpose: Only an unreadable destination justifies deleting the copy.
+                 A transient lock must leave the last good snapshot in place.
+        """
+        print("Setup: enable DB, write a row, produce a valid copy...")
+        _enable_db(monkeypatch, tmp_path)
+
+        import kiro.usage_db as udb
+
+        udb._record_usage_sync(_make_fields(model="transient-lock"))
+        await udb.sync_readonly_copy()
+
+        dst = tmp_path / "usage-readonly.db"
+        assert dst.exists()
+
+        def _locked(dst_path: Path) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(udb, "_backup_to", _locked)
+
+        print("Action: sync while the destination is locked...")
+        await udb.sync_readonly_copy()  # must not raise
+
+        print("Assert: previous good copy is still readable...")
+        assert dst.exists()
+        with sqlite3.connect(str(dst)) as prev:
+            assert prev.execute("SELECT COUNT(*) FROM usage_log").fetchone()[0] == 1
+
 
 # --------------------------------------------------------------------------------------------------
 # TestClose

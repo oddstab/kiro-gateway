@@ -222,6 +222,7 @@ class AwsEventStreamParser:
     - tool_start: Start of tool call (name, toolUseId)
     - tool_input: Continuation of input for tool call
     - tool_stop: End of tool call
+    - stop_reason: Kiro upstream stop reason (END_TURN, TOOL_USE, MAX_TOKENS, STOP_SEQUENCE, CONTENT_FILTERED, GUARDRAIL_INTERVENED)
     - usage: Credit consumption information
     - context_usage: Context usage percentage
     
@@ -248,6 +249,7 @@ class AwsEventStreamParser:
         ('{"name":', 'tool_start'),
         ('{"input":', 'tool_input'),
         ('{"stop":', 'tool_stop'),
+        ('{"stopReason":', 'stop_reason'),
         ('{"followupPrompt":', 'followup'),
         ('{"usage":', 'usage'),
         ('{"contextUsagePercentage":', 'context_usage'),
@@ -348,6 +350,8 @@ class AwsEventStreamParser:
             return self._process_tool_input_event(data)
         elif event_type == 'tool_stop':
             return self._process_tool_stop_event(data)
+        elif event_type == 'stop_reason':
+            return {"type": "stop_reason", "data": data.get('stopReason', '')}
         elif event_type == 'usage':
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'context_usage':
